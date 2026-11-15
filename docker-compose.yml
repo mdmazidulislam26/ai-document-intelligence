@@ -1,0 +1,82 @@
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: doc_intelligence_postgres
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-doc_intelligence}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-doc_intelligence}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: doc_intelligence_redis
+    restart: always
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: doc_intelligence_api
+    restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file:
+      - .env.example
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/doc_intelligence
+      REDIS_URL: redis://redis:6379/0
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+      - uploads_volume:/tmp/doc_intelligence/uploads
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+
+  celery_worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: doc_intelligence_worker
+    restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file:
+      - .env.example
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/doc_intelligence
+      REDIS_URL: redis://redis:6379/0
+    volumes:
+      - ./backend:/app
+      - uploads_volume:/tmp/doc_intelligence/uploads
+    command: celery -A core.celery_app.celery_app worker --loglevel=info --concurrency=2
+
+volumes:
+  postgres_data:
+  redis_data:
+  uploads_volume:

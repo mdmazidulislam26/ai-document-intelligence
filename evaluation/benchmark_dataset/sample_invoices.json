@@ -1,0 +1,44 @@
+[
+  {
+    "id": 1,
+    "text": "INVOICE #INV-5001\nDate: 2024-03-15\nSupplier: FastCloud Hosting Inc.\nCustomer: Acme Enterprise\nDescription: Cloud Compute Units (Qty: 2, Unit: 100.00, Total: 200.00)\nDescription: Domain Renewal (Qty: 1, Unit: 20.00, Total: 20.00)\nSubtotal: 220.00\nTax: 22.00\nTotal: 242.00 USD",
+    "ground_truth": {
+      "invoice_number": "INV-5001",
+      "invoice_date": "2024-03-15",
+      "supplier_name": "FastCloud Hosting Inc.",
+      "customer_name": "Acme Enterprise",
+      "subtotal": 220.0,
+      "tax": 22.0,
+      "total_amount": 242.0,
+      "currency": "USD"
+    }
+  },
+  {
+    "id": 2,
+    "text": "TAX INVOICE: 99421\nBilled On: 2024-04-10\nFrom: Apex Office Supplies\nTo: Delta Corp\nSubtotal: 450.00\nVAT: 45.00\nAmount Due: 495.00 USD",
+    "ground_truth": {
+      "invoice_number": "99421",
+      "invoice_date": "2024-04-10",
+      "supplier_name": "Apex Office Supplies",
+      "customer_name": "Delta Corp",
+      "subtotal": 450.0,
+      "tax": 45.0,
+      "total_amount": 495.0,
+      "currency": "USD"
+    }
+  },
+  {
+    "id": 3,
+    "text": "RECEIPT #RC-1088\nIssued: 2024-02-01\nVendor: Global Telecom\nClient: Matrix Ltd\nTotal: 150.00 USD\nSubtotal: 135.00\nTax: 15.00",
+    "ground_truth": {
+      "invoice_number": "RC-1088",
+      "invoice_date": "2024-02-01",
+      "supplier_name": "Global Telecom",
+      "customer_name": "Matrix Ltd",
+      "subtotal": 135.0,
+      "tax": 15.0,
+      "total_amount": 150.0,
+      "currency": "USD"
+    }
+  }
+]

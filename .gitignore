@@ -1,0 +1,31 @@
+# Environments & Secrets
+**/.env
+**/.env.*
+.env
+.env.*
+
+# Python Virtual Environments
+**/venv/
+**/.venv/
+venv/
+.venv/
+
+# Node.js & Next.js
+**/node_modules/
+**/.next/
+node_modules/
+.next/
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/build/
+
+# Caches & Bytecode
+**/__pycache__/
+**/.pytest_cache/
+*.py[cod]
+.pytest_cache/
+
+# Uploads & Temp
+uploads/
+/tmp/doc_intelligence/
