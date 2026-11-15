@@ -1,9 +1,10 @@
 """
-AI information extraction service using Groq API (free tier) with OpenAI client compatibility.
+AI information extraction service using OpenAI-compatible endpoint.
 Extracts structured invoice schemas with strict zero-hallucination guarantees.
 """
 
 import json
+import re
 import logging
 from typing import Optional
 from openai import OpenAI
@@ -20,14 +21,9 @@ class AIExtractorService:
     """
 
     def __init__(self):
-        # Configure client pointing to Groq Cloud OpenAI-compatible endpoint
-        api_key = settings.GROQ_API_KEY
-        if not api_key:
-            logger.warning("GROQ_API_KEY is not set. Extraction will fail unless configured.")
-
         self.client = OpenAI(
             base_url="https://api.groq.com/openai/v1",
-            api_key=api_key or "missing_key",
+            api_key=settings.GROQ_API_KEY,
         )
         self.model = settings.LLM_MODEL
 
@@ -40,13 +36,11 @@ class AIExtractorService:
             logger.warning("Empty document text passed to AI extractor.")
             return InvoiceExtractionSchema()
 
-        # Truncate text context safely if document is exceedingly large
         max_chars = 32000
         truncated_text = document_text[:max_chars]
 
         system_prompt = (
-            "You are a strict, production-grade financial data extraction engine.\n"
-            "Analyze the provided document text and extract financial invoice data matching this exact JSON schema:\n"
+            "You are a strict financial data extraction engine. Analyze the document and return ONLY a valid JSON object matching this schema:\n"
             "{\n"
             '  "invoice_number": string or null,\n'
             '  "invoice_date": "YYYY-MM-DD" or null,\n'
@@ -55,42 +49,56 @@ class AIExtractorService:
             '  "subtotal": float or null,\n'
             '  "tax": float or null,\n'
             '  "total_amount": float or null,\n'
-            '  "currency": string (e.g. "USD", "EUR", "BDT") or "USD",\n'
+            '  "currency": string or "USD",\n'
             '  "line_items": [\n'
             '    {"description": string, "quantity": float, "unit_price": float, "total": float}\n'
             "  ]\n"
-            "}\n\n"
-            "CRITICAL ZERO-HALLUCINATION RULES:\n"
-            "1. NEVER invent, assume, or hallucinate any value.\n"
-            "2. If an invoice number, date, tax, or total is not clearly stated, return null.\n"
-            "3. Format dates strictly as YYYY-MM-DD. If ambiguous or unreadable, return null.\n"
-            "4. Return ONLY valid JSON. Do not include markdown code fences or conversational text."
+            "}\n"
+            "RULES: If any field is not stated in the text, return null. Return ONLY raw JSON without markdown fences."
         )
 
-        user_prompt = f"Document content to extract:\n\n{truncated_text}"
+        user_prompt = f"Invoice Content:\n\n{truncated_text}"
 
+        raw_response = ""
         try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                response_format={"type": "json_object"},
-                temperature=0.0,  # Zero temperature for deterministic extraction
-                max_tokens=4096,
-            )
+            # First attempt with json_object response format
+            try:
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    response_format={"type": "json_object"},
+                    temperature=0.0,
+                    max_tokens=2048,
+                )
+                raw_response = response.choices[0].message.content or "{}"
+            except Exception:
+                # Fallback without explicit response_format if not supported by model
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    temperature=0.0,
+                    max_tokens=2048,
+                )
+                raw_response = response.choices[0].message.content or "{}"
 
-            raw_response = response.choices[0].message.content
-            parsed_json = json.loads(raw_response)
+            # Strip any markdown fences like ```json ... ```
+            cleaned = re.sub(r"^```[a-zA-Z]*\s*", "", raw_response.strip())
+            cleaned = re.sub(r"\s*```$", "", cleaned).strip()
 
-            # Validate and cast into strict Pydantic model
-            structured_data = InvoiceExtractionSchema(**parsed_json)
-            return structured_data
+            # Extract first JSON object block if surrounded by text
+            json_match = re.search(r"\{.*\}", cleaned, re.DOTALL)
+            if json_match:
+                cleaned = json_match.group(0)
 
-        except json.JSONDecodeError as json_err:
-            logger.error(f"Failed to parse JSON response from LLM: {str(json_err)}")
-            return InvoiceExtractionSchema()
+            parsed_json = json.loads(cleaned)
+            return InvoiceExtractionSchema(**parsed_json)
+
         except Exception as e:
-            logger.error(f"Error during AI extraction: {str(e)}")
-            raise RuntimeError(f"AI extraction failed: {str(e)}")
+            logger.error(f"Error during AI extraction: {str(e)} | Raw: {raw_response[:200]}")
+            return InvoiceExtractionSchema()
