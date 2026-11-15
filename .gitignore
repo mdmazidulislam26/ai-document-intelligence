@@ -1,31 +1,20 @@
-# Environments & Secrets
-**/.env
-**/.env.*
 .env
 .env.*
-
-# Python Virtual Environments
-**/venv/
-**/.venv/
-venv/
-.venv/
-
-# Node.js & Next.js
-**/node_modules/
-**/.next/
 node_modules/
-.next/
+*/node_modules/
+**/node_modules/
 frontend/node_modules/
+.next/
+*/.next/
+**/.next/
 frontend/.next/
-frontend/out/
-frontend/build/
-
-# Caches & Bytecode
+venv/
+*/venv/
+**/venv/
+__pycache__/
 **/__pycache__/
+.pytest_cache/
 **/.pytest_cache/
 *.py[cod]
-.pytest_cache/
-
-# Uploads & Temp
 uploads/
 /tmp/doc_intelligence/
