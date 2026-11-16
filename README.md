@@ -102,4 +102,3 @@ cd frontend
 npm install
 npm run dev
 ```
-Codespaces will show a popup notification: **"Your application running on port 3000 is available"**. Click **Open in Browser** to explore the dashboard!
