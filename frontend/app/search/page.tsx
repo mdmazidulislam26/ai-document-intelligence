@@ -17,7 +17,7 @@ export default function SearchPage() {
     if (!query.trim()) return;
 
     setLoading(true);
-    const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+    const apiUrl = '';
     try {
       const res = await axios.get(`${apiUrl}/api/search`, {
         params: { q: query, type: searchType, limit: 15 },

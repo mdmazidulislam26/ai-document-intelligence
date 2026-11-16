@@ -44,10 +44,11 @@ services:
       redis:
         condition: service_healthy
     env_file:
-      - .env.example
+      - .env
     environment:
       DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/doc_intelligence
       REDIS_URL: redis://redis:6379/0
+      SYNC_DATABASE_URL: postgresql+psycopg2://postgres:postgres@postgres:5432/doc_intelligence
     ports:
       - "8000:8000"
     volumes:
@@ -67,10 +68,11 @@ services:
       redis:
         condition: service_healthy
     env_file:
-      - .env.example
+      - .env
     environment:
       DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/doc_intelligence
       REDIS_URL: redis://redis:6379/0
+      SYNC_DATABASE_URL: postgresql+psycopg2://postgres:postgres@postgres:5432/doc_intelligence
     volumes:
       - ./backend:/app
       - uploads_volume:/tmp/doc_intelligence/uploads

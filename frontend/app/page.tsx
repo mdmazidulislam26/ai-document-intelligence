@@ -24,7 +24,7 @@ interface DocumentRecord {
 export default function DashboardPage() {
   const [documents, setDocuments] = useState<DocumentRecord[]>([]);
   const [loading, setLoading] = useState(true);
-  const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+  const apiUrl = '';
 
   const fetchDocuments = async () => {
     try {

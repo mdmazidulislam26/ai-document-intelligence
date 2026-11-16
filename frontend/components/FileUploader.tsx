@@ -20,7 +20,7 @@ export const FileUploader: React.FC<{ onUploadSuccess: () => void }> = ({ onUplo
     });
 
     try {
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+      const apiUrl = '';
       await axios.post(`${apiUrl}/api/documents/upload`, formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
       });
