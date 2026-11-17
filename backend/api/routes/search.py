@@ -1,5 +1,6 @@
 """
 Hybrid, semantic, and keyword search API endpoints over extracted documents.
+Returns rich relevance ranking and RRF metadata.
 """
 
 from typing import List
@@ -21,9 +22,9 @@ async def search_documents(
 ):
     """
     Executes high-performance search across processed documents:
-    - keyword: Full-text matching in supplier, invoice number, and filename
+    - keyword: PostgreSQL Full-Text Search (ts_rank) & partial identifier match
     - semantic: Cosine distance matching via pgvector and FastEmbed embeddings
-    - hybrid: Combined weighted ranking of keyword and semantic signals
+    - hybrid: Reciprocal Rank Fusion (RRF) combining keyword and semantic rankings
     """
     try:
         raw_results = await VectorService.hybrid_search(
@@ -35,6 +36,7 @@ async def search_documents(
 
         output = []
         for r in raw_results:
+            sim_score = r.get("score")
             output.append(
                 SearchResultItem(
                     document_id=r.get("document_id"),
@@ -42,8 +44,13 @@ async def search_documents(
                     supplier_name=r.get("supplier_name"),
                     invoice_number=r.get("invoice_number"),
                     total_amount=r.get("total_amount"),
+                    currency=r.get("currency"),
                     status=r.get("status", "unknown"),
-                    similarity_score=round(float(r.get("score", 0.0)), 4) if r.get("score") is not None else None
+                    similarity_score=round(float(sim_score), 4) if sim_score is not None else None,
+                    rrf_score=r.get("rrf_score"),
+                    match_type=r.get("match_type", type),
+                    keyword_rank=r.get("keyword_rank"),
+                    semantic_rank=r.get("semantic_rank")
                 )
             )
         return output

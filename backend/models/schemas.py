@@ -1,6 +1,6 @@
 """
-Pydantic v2 validation schemas for API requests, responses, and AI structured output.
-Updated with Decimal support for robust monetary calculations without float inaccuracy.
+Pydantic v2 validation schemas for API requests, responses, AI structured output,
+and rich hybrid search results with Reciprocal Rank Fusion metadata.
 """
 
 from datetime import datetime, date
@@ -35,7 +35,7 @@ class InvoiceExtractionSchema(BaseModel):
     subtotal: Optional[Decimal] = Field(default=None, description="Taxable amount before tax/shipping")
     tax: Optional[Decimal] = Field(default=None, description="Total sales tax, VAT, or GST applied")
     total_amount: Optional[Decimal] = Field(default=None, description="Final gross total payable amount")
-    currency: Optional[str] = Field(default="USD", description="3-letter ISO currency code or currency symbol")
+    currency: Optional[str] = Field(default=None, description="3-letter ISO currency code or currency symbol")
     line_items: List[LineItemSchema] = Field(default_factory=list, description="List of itemized products or services")
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -117,11 +117,16 @@ class SearchRequest(BaseModel):
 
 
 class SearchResultItem(BaseModel):
-    """Single item returned in search queries."""
+    """Single item returned in search queries with rich ranking metadata."""
     document_id: int
     filename: str
-    supplier_name: Optional[str]
-    invoice_number: Optional[str]
+    supplier_name: Optional[str] = None
+    invoice_number: Optional[str] = None
     total_amount: Optional[Decimal] = None
+    currency: Optional[str] = None
     status: str
     similarity_score: Optional[float] = None
+    rrf_score: Optional[float] = None
+    match_type: Optional[str] = Field(default="hybrid", description="hybrid | keyword_only | semantic_only")
+    keyword_rank: Optional[int] = None
+    semantic_rank: Optional[int] = None

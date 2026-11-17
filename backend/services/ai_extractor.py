@@ -1,33 +1,60 @@
 """
 AI information extraction service.
-Seamlessly parses multi-row CSV/Excel spreadsheets, extracting header metadata
-from primary entries and calculating accurate line-item reconciliations.
+Uses Groq free API with strict JSON schema outputs.
+Implements typed exceptions for transient/permanent failures,
+zero-hallucination policy (currency is null if not specified),
+and deterministic multi-chunk merging.
 """
 
 import json
 import re
 import logging
-from openai import OpenAI
+from decimal import Decimal
+from typing import List, Optional
+from openai import OpenAI, APIConnectionError, RateLimitError, AuthenticationError, APIStatusError
 from core.config import settings
-from models.schemas import InvoiceExtractionSchema
+from models.schemas import InvoiceExtractionSchema, LineItemSchema
 
 logger = logging.getLogger("ai_extractor")
 logger.setLevel(logging.INFO)
 
 
+class AIExtractionError(Exception):
+    """Base exception for AI extraction pipeline."""
+    pass
+
+
+class AITransientError(AIExtractionError):
+    """Transient errors (Rate limits, Network timeouts) that Celery must retry."""
+    pass
+
+
+class AIAuthenticationError(AIExtractionError):
+    """Permanent configuration or authentication failure."""
+    pass
+
+
+class AIMalformedResponseError(AIExtractionError):
+    """LLM returned unparseable or schema-violating output."""
+    pass
+
+
 class AIExtractorService:
     def __init__(self):
+        self.api_key = settings.GROQ_API_KEY
+        self.model = settings.LLM_MODEL
         self.client = OpenAI(
             base_url="https://api.groq.com/openai/v1",
-            api_key=settings.GROQ_API_KEY,
+            api_key=self.api_key or "missing_key",
         )
-        self.model = settings.LLM_MODEL
 
-    def extract_invoice_data(self, document_text: str) -> InvoiceExtractionSchema:
-        if not document_text or not document_text.strip():
+    def extract_from_chunk(self, chunk_text: str) -> InvoiceExtractionSchema:
+        """Sends a single chunk to the LLM with strict JSON schema enforcement."""
+        if not chunk_text or not chunk_text.strip():
             return InvoiceExtractionSchema()
 
-        truncated_text = document_text[:32000]
+        if not self.api_key or self.api_key.strip() == "":
+            raise AIAuthenticationError("GROQ_API_KEY is not configured in environment.")
 
         system_prompt = (
             "You are an expert financial data extraction engine. Analyze the document and return ONLY a valid JSON object matching this schema:\n"
@@ -39,24 +66,20 @@ class AIExtractorService:
             '  "subtotal": float or null,\n'
             '  "tax": float or null,\n'
             '  "total_amount": float or null,\n'
-            '  "currency": string or "USD",\n'
+            '  "currency": string or null,\n'
             '  "line_items": [\n'
             '    {"description": string, "quantity": float, "unit_price": float, "total": float}\n'
             "  ]\n"
             "}\n"
-            "RULES FOR CSV / SPREADSHEETS:\n"
-            "1. 'supplier_name': Extract the supplier/vendor name from the first row or primary vendor.\n"
-            "2. 'customer_name': Extract the common billed customer across rows.\n"
-            "3. 'invoice_number': Extract the invoice number from the first row.\n"
-            "4. 'invoice_date': Extract the date from the first row in YYYY-MM-DD format.\n"
-            "5. 'line_items': Each row MUST be an item in the array. 'total' for each row is its subtotal amount.\n"
-            "6. 'subtotal': Mathematical sum of all row subtotals.\n"
-            "7. 'tax': Mathematical sum of all row taxes.\n"
-            "8. 'total_amount': Subtotal + Tax.\n"
-            "9. Return ONLY raw JSON without markdown code fences."
+            "RULES:\n"
+            "1. ZERO HALLUCINATION: If any field is not explicitly present or discernable, return null.\n"
+            "2. Never assume USD or any currency unless explicitly stated or indicated by symbol ($ -> USD, € -> EUR, £ -> GBP).\n"
+            "3. Format invoice_date strictly as YYYY-MM-DD if available.\n"
+            "4. For spreadsheets, each row should map to a line item.\n"
+            "5. Return ONLY raw JSON without markdown code fences."
         )
 
-        user_prompt = f"Document Content:\n\n{truncated_text}"
+        user_prompt = f"Document Content:\n\n{chunk_text}"
         raw_response = ""
 
         try:
@@ -73,6 +96,7 @@ class AIExtractorService:
                 )
                 raw_response = response.choices[0].message.content or "{}"
             except Exception:
+                # Fallback without json_object if model variant rejects parameter
                 response = self.client.chat.completions.create(
                     model=self.model,
                     messages=[
@@ -84,16 +108,104 @@ class AIExtractorService:
                 )
                 raw_response = response.choices[0].message.content or "{}"
 
+        except AuthenticationError as auth_err:
+            raise AIAuthenticationError(f"Groq API authentication failed: {str(auth_err)}") from auth_err
+        except (RateLimitError, APIConnectionError) as trans_err:
+            raise AITransientError(f"Transient Groq API error: {str(trans_err)}") from trans_err
+        except APIStatusError as status_err:
+            if status_err.status_code in [429, 502, 503, 504]:
+                raise AITransientError(f"Groq server status {status_err.status_code}") from status_err
+            raise AIExtractionError(f"Groq API status error: {str(status_err)}") from status_err
+        except Exception as e:
+            raise AIExtractionError(f"Unexpected AI client error: {str(e)}") from e
+
+        # Clean and parse JSON response
+        try:
             cleaned = re.sub(r"^```[a-zA-Z]*\s*", "", raw_response.strip())
             cleaned = re.sub(r"\s*```$", "", cleaned).strip()
-
             json_match = re.search(r"\{.*\}", cleaned, re.DOTALL)
             if json_match:
                 cleaned = json_match.group(0)
 
             parsed_json = json.loads(cleaned)
             return InvoiceExtractionSchema(**parsed_json)
+        except Exception as parse_err:
+            logger.error(f"Failed to parse LLM JSON: {parse_err} | Raw: {raw_response[:200]}")
+            raise AIMalformedResponseError(f"Malformed LLM JSON output: {str(parse_err)}") from parse_err
 
-        except Exception as e:
-            logger.error(f"Error during AI extraction: {str(e)} | Raw: {raw_response[:200]}")
+    @classmethod
+    def merge_extractions(cls, extractions: List[InvoiceExtractionSchema]) -> InvoiceExtractionSchema:
+        """
+        Deterministically merges extractions from multiple chunks without data loss or duplicate line items.
+        """
+        if not extractions:
             return InvoiceExtractionSchema()
+
+        merged = InvoiceExtractionSchema()
+        seen_line_items = set()
+
+        for ext in extractions:
+            # Metadata: Keep first non-null
+            if not merged.invoice_number and ext.invoice_number:
+                merged.invoice_number = ext.invoice_number
+            if not merged.invoice_date and ext.invoice_date:
+                merged.invoice_date = ext.invoice_date
+            if not merged.supplier_name and ext.supplier_name:
+                merged.supplier_name = ext.supplier_name
+            if not merged.customer_name and ext.customer_name:
+                merged.customer_name = ext.customer_name
+            if not merged.currency and ext.currency:
+                merged.currency = ext.currency
+
+            # Financial Totals: Prefer non-null
+            if merged.subtotal is None and ext.subtotal is not None:
+                merged.subtotal = ext.subtotal
+            if merged.tax is None and ext.tax is not None:
+                merged.tax = ext.tax
+            if merged.total_amount is None and ext.total_amount is not None:
+                merged.total_amount = ext.total_amount
+
+            # Merge line items avoiding duplicates
+            for it in ext.line_items:
+                # Key based on description and total
+                desc_key = (it.description or "").strip().lower()
+                tot_key = str(it.total) if it.total is not None else ""
+                item_id = f"{desc_key}_{tot_key}"
+
+                if item_id not in seen_line_items or (not desc_key and not tot_key):
+                    if item_id:
+                        seen_line_items.add(item_id)
+                    merged.line_items.append(it)
+
+        return merged
+
+    def extract_invoice_data(self, document_text: str) -> InvoiceExtractionSchema:
+        """
+        Splits large document text into manageable chunks if needed,
+        extracts data per chunk, and deterministically merges the results.
+        """
+        if not document_text or not document_text.strip():
+            return InvoiceExtractionSchema()
+
+        max_chunk_chars = 24000
+        if len(document_text) <= max_chunk_chars:
+            return self.extract_from_chunk(document_text)
+
+        # Chunk document text with 1000 character overlap
+        chunks = []
+        start = 0
+        overlap = 1000
+        while start < len(document_text):
+            end = min(start + max_chunk_chars, len(document_text))
+            chunks.append(document_text[start:end])
+            if end == len(document_text):
+                break
+            start += max_chunk_chars - overlap
+
+        extractions = []
+        for idx, chunk in enumerate(chunks):
+            logger.info(f"Extracting AI data from chunk {idx + 1}/{len(chunks)}...")
+            res = self.extract_from_chunk(chunk)
+            extractions.append(res)
+
+        return self.merge_extractions(extractions)
