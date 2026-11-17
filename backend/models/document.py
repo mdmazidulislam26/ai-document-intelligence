@@ -1,13 +1,16 @@
 """
 SQLAlchemy ORM models defining documents, extracted invoice data, and validation logs.
+Updated with strict financial Decimal precision (Numeric 12,2) and Date types.
 """
 
-from datetime import datetime
+from datetime import datetime, date
+from decimal import Decimal
 from sqlalchemy import (
     Column,
     Integer,
     String,
-    Float,
+    Numeric,
+    Date,
     Boolean,
     DateTime,
     Text,
@@ -57,7 +60,7 @@ class Document(Base):
 class ExtractedInvoice(Base):
     """
     Stores structured financial records extracted from documents,
-    along with pgvector dense vector embeddings for semantic search.
+    using high-precision Numeric types for financial amounts and Date for invoice date.
     """
     __tablename__ = "extracted_invoices"
 
@@ -65,13 +68,14 @@ class ExtractedInvoice(Base):
     document_id = Column(Integer, ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, unique=True)
     
     invoice_number = Column(String(128), nullable=True, index=True)
-    invoice_date = Column(DateTime, nullable=True)
+    invoice_date = Column(Date, nullable=True)
     supplier_name = Column(String(255), nullable=True, index=True)
     customer_name = Column(String(255), nullable=True)
     
-    subtotal = Column(Float, nullable=True)
-    tax = Column(Float, nullable=True)
-    total_amount = Column(Float, nullable=True)
+    # Strict financial precision: Numeric(12, 2)
+    subtotal = Column(Numeric(12, 2), nullable=True)
+    tax = Column(Numeric(12, 2), nullable=True)
+    total_amount = Column(Numeric(12, 2), nullable=True)
     currency = Column(String(16), nullable=True, default="USD")
     
     # Itemized lines stored as JSON array of objects

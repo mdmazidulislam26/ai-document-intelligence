@@ -1,17 +1,20 @@
 """
 Celery background worker pipeline tasks.
+Performs synchronous full-text extraction, AI information extraction,
+financial decimal validation, and main pipeline duplicate checking.
 """
 
 import logging
 from datetime import datetime
-from sqlalchemy import create_engine, select
+from decimal import Decimal
+from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from core.celery_app import celery_app
 from core.config import settings
 from models.document import Document, ExtractedInvoice, ValidationLog
 from services.document_parser import DocumentParserService
 from services.ai_extractor import AIExtractorService
-from services.validator import DocumentValidator
+from services.validator import DocumentValidator, to_decimal
 from services.vector_service import VectorService
 
 logger = logging.getLogger("processing_tasks")
@@ -42,21 +45,31 @@ def process_document_task(self, document_id: int):
         ai_service = AIExtractorService()
         extracted_data = ai_service.extract_invoice_data(raw_text)
 
-        # Execute validations
+        # Execute validations: Math and Required Fields
         val_errors = []
         val_errors.extend(DocumentValidator.validate_math(extracted_data))
         val_errors.extend(DocumentValidator.validate_required_fields(extracted_data))
+
+        # Main Pipeline Duplicate Check (Synchronous)
+        dup_errors = DocumentValidator.check_duplicate_invoice_sync(
+            session=session,
+            invoice_number=extracted_data.invoice_number,
+            supplier_name=extracted_data.supplier_name,
+            current_doc_id=document_id
+        )
+        val_errors.extend(dup_errors)
 
         # Build embedding summary
         summary = (
             f"Supplier: {extracted_data.supplier_name or 'N/A'}. "
             f"Invoice: {extracted_data.invoice_number or 'N/A'}. "
-            f"Total: {extracted_data.total_amount or 0.0} {extracted_data.currency or 'USD'}. "
+            f"Total: {extracted_data.total_amount or Decimal('0.00')} {extracted_data.currency or 'USD'}. "
             f"Customer: {extracted_data.customer_name or 'N/A'}. "
             f"Text: {raw_text[:800]}"
         )
         embedding_vector = VectorService.generate_embedding(summary)
 
+        # Parse invoice_date strictly to datetime.date
         parsed_date = None
         if extracted_data.invoice_date:
             try:
@@ -64,7 +77,18 @@ def process_document_task(self, document_id: int):
             except ValueError:
                 parsed_date = None
 
-        line_items_dict = [it.model_dump() for it in extracted_data.line_items]
+        # Convert line items ensuring Decimal serializability into JSONB
+        line_items_dict = []
+        for it in extracted_data.line_items:
+            dump = it.model_dump()
+            for k in ["quantity", "unit_price", "total"]:
+                if dump.get(k) is not None:
+                    dump[k] = float(dump[k])
+            line_items_dict.append(dump)
+
+        subtotal_val = to_decimal(extracted_data.subtotal)
+        tax_val = to_decimal(extracted_data.tax)
+        total_val = to_decimal(extracted_data.total_amount)
 
         record = session.query(ExtractedInvoice).filter(ExtractedInvoice.document_id == document_id).first()
         if not record:
@@ -74,9 +98,9 @@ def process_document_task(self, document_id: int):
                 invoice_date=parsed_date,
                 supplier_name=extracted_data.supplier_name,
                 customer_name=extracted_data.customer_name,
-                subtotal=extracted_data.subtotal,
-                tax=extracted_data.tax,
-                total_amount=extracted_data.total_amount,
+                subtotal=subtotal_val,
+                tax=tax_val,
+                total_amount=total_val,
                 currency=extracted_data.currency or "USD",
                 line_items=line_items_dict,
                 raw_text=raw_text,
@@ -88,9 +112,9 @@ def process_document_task(self, document_id: int):
             record.invoice_date = parsed_date
             record.supplier_name = extracted_data.supplier_name
             record.customer_name = extracted_data.customer_name
-            record.subtotal = extracted_data.subtotal
-            record.tax = extracted_data.tax
-            record.total_amount = extracted_data.total_amount
+            record.subtotal = subtotal_val
+            record.tax = tax_val
+            record.total_amount = total_val
             record.currency = extracted_data.currency or "USD"
             record.line_items = line_items_dict
             record.raw_text = raw_text
@@ -109,7 +133,7 @@ def process_document_task(self, document_id: int):
             )
             session.add(log_entry)
 
-        # Only require manual review if there are real ERROR or CRITICAL mismatches
+        # Mark requires_manual_review if critical errors (like duplicate or math mismatch) occur
         doc.status = "requires_manual_review" if has_critical else "validated"
         session.commit()
         return True

@@ -1,9 +1,10 @@
 """
 Manual correction endpoints enabling human-in-the-loop adjustments,
-with dynamic re-validation and vector embedding updates.
+with dynamic re-validation and vector embedding updates using Decimal precision.
 """
 
-from datetime import datetime
+from datetime import datetime, date
+from decimal import Decimal
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete
@@ -12,7 +13,7 @@ from sqlalchemy.orm import selectinload
 from core.database import get_db
 from models.document import Document, ExtractedInvoice, ValidationLog
 from models.schemas import ManualCorrectionRequest, DocumentResponse, InvoiceExtractionSchema, LineItemSchema
-from services.validator import DocumentValidator
+from services.validator import DocumentValidator, to_decimal
 from services.vector_service import VectorService
 
 router = APIRouter(prefix="/documents", tags=["Human Review & Corrections"])
@@ -28,7 +29,6 @@ async def correct_invoice_data(
     Applies manual user adjustments to an extracted invoice.
     Re-runs deterministic validation rules and refreshes pgvector embeddings.
     """
-    # Fetch document with extracted invoice
     query = (
         select(Document)
         .options(
@@ -57,11 +57,11 @@ async def correct_invoice_data(
     if payload.customer_name is not None:
         invoice.customer_name = payload.customer_name
     if payload.subtotal is not None:
-        invoice.subtotal = payload.subtotal
+        invoice.subtotal = to_decimal(payload.subtotal)
     if payload.tax is not None:
-        invoice.tax = payload.tax
+        invoice.tax = to_decimal(payload.tax)
     if payload.total_amount is not None:
-        invoice.total_amount = payload.total_amount
+        invoice.total_amount = to_decimal(payload.total_amount)
     if payload.currency is not None:
         invoice.currency = payload.currency
     if payload.line_items is not None:
@@ -70,7 +70,18 @@ async def correct_invoice_data(
     invoice.is_manually_corrected = True
 
     # Build Pydantic model to re-run validation checks
-    items = [LineItemSchema(**it) for it in invoice.line_items] if invoice.line_items else []
+    items = []
+    if invoice.line_items:
+        for it in invoice.line_items:
+            items.append(
+                LineItemSchema(
+                    description=it.get("description"),
+                    quantity=to_decimal(it.get("quantity")),
+                    unit_price=to_decimal(it.get("unit_price")),
+                    total=to_decimal(it.get("total")),
+                )
+            )
+
     date_str = invoice.invoice_date.strftime("%Y-%m-%d") if invoice.invoice_date else None
     
     validation_payload = InvoiceExtractionSchema(
@@ -78,9 +89,9 @@ async def correct_invoice_data(
         invoice_date=date_str,
         supplier_name=invoice.supplier_name,
         customer_name=invoice.customer_name,
-        subtotal=invoice.subtotal,
-        tax=invoice.tax,
-        total_amount=invoice.total_amount,
+        subtotal=to_decimal(invoice.subtotal),
+        tax=to_decimal(invoice.tax),
+        total_amount=to_decimal(invoice.total_amount),
         currency=invoice.currency,
         line_items=items
     )
@@ -117,7 +128,7 @@ async def correct_invoice_data(
     summary = (
         f"Supplier: {invoice.supplier_name or 'N/A'}. "
         f"Invoice: {invoice.invoice_number or 'N/A'}. "
-        f"Total: {invoice.total_amount or 0.0} {invoice.currency or 'USD'}. "
+        f"Total: {invoice.total_amount or Decimal('0.00')} {invoice.currency or 'USD'}. "
         f"Customer: {invoice.customer_name or 'N/A'}."
     )
     invoice.embedding = VectorService.generate_embedding(summary)

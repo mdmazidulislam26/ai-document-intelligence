@@ -1,8 +1,10 @@
 """
 Pydantic v2 validation schemas for API requests, responses, and AI structured output.
+Updated with Decimal support for robust monetary calculations without float inaccuracy.
 """
 
 from datetime import datetime, date
+from decimal import Decimal
 from typing import List, Optional
 from pydantic import BaseModel, Field, ConfigDict
 
@@ -14,9 +16,11 @@ from pydantic import BaseModel, Field, ConfigDict
 class LineItemSchema(BaseModel):
     """Represents an individual itemized line in an invoice."""
     description: Optional[str] = Field(default=None, description="Item description or name")
-    quantity: Optional[float] = Field(default=None, description="Quantity purchased")
-    unit_price: Optional[float] = Field(default=None, description="Price per individual unit")
-    total: Optional[float] = Field(default=None, description="Total amount for this specific line item")
+    quantity: Optional[Decimal] = Field(default=None, description="Quantity purchased")
+    unit_price: Optional[Decimal] = Field(default=None, description="Price per individual unit")
+    total: Optional[Decimal] = Field(default=None, description="Total amount for this specific line item")
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
 class InvoiceExtractionSchema(BaseModel):
@@ -28,11 +32,13 @@ class InvoiceExtractionSchema(BaseModel):
     invoice_date: Optional[str] = Field(default=None, description="Issue date in YYYY-MM-DD string format if discernable")
     supplier_name: Optional[str] = Field(default=None, description="Name of the billing vendor, supplier, or company")
     customer_name: Optional[str] = Field(default=None, description="Name of the billed client, company, or customer")
-    subtotal: Optional[float] = Field(default=None, description="Taxable amount before tax/shipping")
-    tax: Optional[float] = Field(default=None, description="Total sales tax, VAT, or GST applied")
-    total_amount: Optional[float] = Field(default=None, description="Final gross total payable amount")
+    subtotal: Optional[Decimal] = Field(default=None, description="Taxable amount before tax/shipping")
+    tax: Optional[Decimal] = Field(default=None, description="Total sales tax, VAT, or GST applied")
+    total_amount: Optional[Decimal] = Field(default=None, description="Final gross total payable amount")
     currency: Optional[str] = Field(default="USD", description="3-letter ISO currency code or currency symbol")
     line_items: List[LineItemSchema] = Field(default_factory=list, description="List of itemized products or services")
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
 # ---------------------------------------------------------
@@ -56,9 +62,9 @@ class ExtractedInvoiceResponse(BaseModel):
     invoice_date: Optional[date]
     supplier_name: Optional[str]
     customer_name: Optional[str]
-    subtotal: Optional[float]
-    tax: Optional[float]
-    total_amount: Optional[float]
+    subtotal: Optional[Decimal]
+    tax: Optional[Decimal]
+    total_amount: Optional[Decimal]
     currency: Optional[str]
     line_items: List[dict]
     is_manually_corrected: bool
@@ -96,9 +102,9 @@ class ManualCorrectionRequest(BaseModel):
     invoice_date: Optional[date] = None
     supplier_name: Optional[str] = None
     customer_name: Optional[str] = None
-    subtotal: Optional[float] = None
-    tax: Optional[float] = None
-    total_amount: Optional[float] = None
+    subtotal: Optional[Decimal] = None
+    tax: Optional[Decimal] = None
+    total_amount: Optional[Decimal] = None
     currency: Optional[str] = None
     line_items: Optional[List[dict]] = None
 
@@ -116,6 +122,6 @@ class SearchResultItem(BaseModel):
     filename: str
     supplier_name: Optional[str]
     invoice_number: Optional[str]
-    total_amount: Optional[float]
+    total_amount: Optional[Decimal] = None
     status: str
     similarity_score: Optional[float] = None

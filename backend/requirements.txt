@@ -24,6 +24,7 @@ opencv-python-headless>=4.9.0.86
 Pillow>=10.3.0
 pandas>=2.2.2
 openpyxl>=3.1.2
+xlrd>=2.0.1
 python-magic>=0.4.27
 
 # AI & Embeddings (100% Free & Local)
