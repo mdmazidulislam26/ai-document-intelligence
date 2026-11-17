@@ -1,0 +1,4 @@
+Invoice Number,Invoice Date,Supplier,Customer,Item Description,Quantity,Unit Price,Total,Currency
+INV-2024-5501,2024-06-15,NexGen Cloud Systems,Acme Global,Dedicated Cloud Server,2,250.00,500.00,USD
+INV-2024-5501,2024-06-15,NexGen Cloud Systems,Acme Global,PostgreSQL Managed DB,1,300.00,300.00,USD
+INV-2024-5501,2024-06-15,NexGen Cloud Systems,Acme Global,SSL & Security Protection,1,100.00,100.00,USD
