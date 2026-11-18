@@ -1,0 +1,366 @@
+[
+  {
+    "id": "doc_01",
+    "file": "files/01_digital_standard.pdf",
+    "category": "digital_pdf",
+    "description": "Clean 1-page digital PDF invoice",
+    "expected_math_valid": true,
+    "ground_truth": {
+      "invoice_number": "INV-2024-8801",
+      "invoice_date": "2024-05-15",
+      "supplier_name": "TechFlow Solutions Ltd.",
+      "customer_name": "Apex Innovations Inc.",
+      "subtotal": 550.0,
+      "tax": 55.0,
+      "total_amount": 605.0,
+      "currency": "USD",
+      "line_items": [
+        {
+          "description": "Cloud Server Hosting",
+          "quantity": 2,
+          "unit_price": 150.0,
+          "total": 300.0
+        },
+        {
+          "description": "Cybersecurity Audit",
+          "quantity": 1,
+          "unit_price": 200.0,
+          "total": 200.0
+        },
+        {
+          "description": "Managed DNS Service",
+          "quantity": 1,
+          "unit_price": 50.0,
+          "total": 50.0
+        }
+      ]
+    }
+  },
+  {
+    "id": "doc_02",
+    "file": "files/02_multipage_12pages.pdf",
+    "category": "multipage_pdf",
+    "description": "12-page digital PDF with line items across pages 3-9 and totals on page 12",
+    "expected_math_valid": true,
+    "ground_truth": {
+      "invoice_number": "INV-MP-1200",
+      "invoice_date": "2024-07-01",
+      "supplier_name": "Horizon Enterprise Cloud Corp.",
+      "customer_name": "Metro Retail Holdings",
+      "subtotal": 1400.0,
+      "tax": 140.0,
+      "total_amount": 1540.0,
+      "currency": "USD",
+      "line_items": [
+        {
+          "description": "Compute Node Cluster 3A",
+          "quantity": 1,
+          "unit_price": 100.0,
+          "total": 100.0
+        },
+        {
+          "description": "Storage Volume Tier 3B",
+          "quantity": 1,
+          "unit_price": 100.0,
+          "total": 100.0
+        },
+        {
+          "description": "Compute Node Cluster 4A",
+          "quantity": 1,
+          "unit_price": 100.0,
+          "total": 100.0
+        },
+        {
+          "description": "Storage Volume Tier 4B",
+          "quantity": 1,
+          "unit_price": 100.0,
+          "total": 100.0
+        },
+        {
+          "description": "Compute Node Cluster 5A",
+          "quantity": 1,
+          "unit_price": 100.0,
+          "total": 100.0
+        },
+        {
+          "description": "Storage Volume Tier 5B",
+          "quantity": 1,
+          "unit_price": 100.0,
+          "total": 100.0
+        },
+        {
+          "description": "Compute Node Cluster 6A",
+          "quantity": 1,
+          "unit_price": 100.0,
+          "total": 100.0
+        },
+        {
+          "description": "Storage Volume Tier 6B",
+          "quantity": 1,
+          "unit_price": 100.0,
+          "total": 100.0
+        },
+        {
+          "description": "Compute Node Cluster 7A",
+          "quantity": 1,
+          "unit_price": 100.0,
+          "total": 100.0
+        },
+        {
+          "description": "Storage Volume Tier 7B",
+          "quantity": 1,
+          "unit_price": 100.0,
+          "total": 100.0
+        },
+        {
+          "description": "Compute Node Cluster 8A",
+          "quantity": 1,
+          "unit_price": 100.0,
+          "total": 100.0
+        },
+        {
+          "description": "Storage Volume Tier 8B",
+          "quantity": 1,
+          "unit_price": 100.0,
+          "total": 100.0
+        },
+        {
+          "description": "Compute Node Cluster 9A",
+          "quantity": 1,
+          "unit_price": 100.0,
+          "total": 100.0
+        },
+        {
+          "description": "Storage Volume Tier 9B",
+          "quantity": 1,
+          "unit_price": 100.0,
+          "total": 100.0
+        }
+      ]
+    }
+  },
+  {
+    "id": "doc_03",
+    "file": "files/03_scanned_clean.pdf",
+    "category": "scanned_pdf",
+    "description": "2-page raster-only scanned PDF requiring Tesseract OCR",
+    "expected_math_valid": true,
+    "ground_truth": {
+      "invoice_number": "SCN-4401",
+      "invoice_date": "2024-06-10",
+      "supplier_name": "Nordic Paper Supply",
+      "customer_name": "Summit Print Works",
+      "subtotal": 300.0,
+      "tax": 30.0,
+      "total_amount": 330.0,
+      "currency": "EUR",
+      "line_items": [
+        {
+          "description": "A4 Bond Paper Pallet",
+          "quantity": 2,
+          "unit_price": 120.0,
+          "total": 240.0
+        },
+        {
+          "description": "Packaging Tape Rolls",
+          "quantity": 4,
+          "unit_price": 15.0,
+          "total": 60.0
+        }
+      ]
+    }
+  },
+  {
+    "id": "doc_04",
+    "file": "files/04_scanned_skewed_noisy.pdf",
+    "category": "scanned_pdf_poor",
+    "description": "Skewed (2.5 deg), noisy, low-contrast scanned PDF",
+    "expected_math_valid": true,
+    "ground_truth": {
+      "invoice_number": "SKW-7710",
+      "invoice_date": "2024-08-05",
+      "supplier_name": "Pacific Freight Logistics",
+      "customer_name": "Harbor Imports LLC",
+      "subtotal": 450.0,
+      "tax": 45.0,
+      "total_amount": 495.0,
+      "currency": "USD",
+      "line_items": [
+        {
+          "description": "Container Drayage",
+          "quantity": 1,
+          "unit_price": 450.0,
+          "total": 450.0
+        }
+      ]
+    }
+  },
+  {
+    "id": "doc_05",
+    "file": "files/05_receipt_clean.png",
+    "category": "png_image",
+    "description": "Clean PNG receipt with no tax field (tests null tax preservation)",
+    "expected_math_valid": true,
+    "ground_truth": {
+      "invoice_number": "REC-7741",
+      "invoice_date": "2024-04-12",
+      "supplier_name": "SuperMart Express",
+      "customer_name": "John Doe",
+      "subtotal": 150.0,
+      "tax": null,
+      "total_amount": 150.0,
+      "currency": "USD",
+      "line_items": [
+        {
+          "description": "Office Supplies",
+          "quantity": 1,
+          "unit_price": 120.0,
+          "total": 120.0
+        },
+        {
+          "description": "Packaging Paper",
+          "quantity": 1,
+          "unit_price": 30.0,
+          "total": 30.0
+        }
+      ]
+    }
+  },
+  {
+    "id": "doc_06",
+    "file": "files/06_invoice_poor_photo.jpg",
+    "category": "jpg_image_poor",
+    "description": "Poor-quality compressed JPEG (-2.5 deg skew, low contrast, noise)",
+    "expected_math_valid": true,
+    "ground_truth": {
+      "invoice_number": "JPG-3092",
+      "invoice_date": "2024-09-18",
+      "supplier_name": "Metro Hardware Supply",
+      "customer_name": "Greenfield Builders",
+      "subtotal": 250.0,
+      "tax": 25.0,
+      "total_amount": 275.0,
+      "currency": "USD",
+      "line_items": [
+        {
+          "description": "Industrial Drill Kit",
+          "quantity": 2,
+          "unit_price": 125.0,
+          "total": 250.0
+        }
+      ]
+    }
+  },
+  {
+    "id": "doc_07",
+    "file": "files/07_multisheet_workbook.xlsx",
+    "category": "xlsx_multisheet",
+    "description": "Multi-sheet XLSX workbook with summary and itemized sheets",
+    "expected_math_valid": true,
+    "ground_truth": {
+      "invoice_number": "XLS-9001",
+      "invoice_date": "2024-06-20",
+      "supplier_name": "EuroTech Consulting GmbH",
+      "customer_name": "Alpine Finance AG",
+      "subtotal": 800.0,
+      "tax": 160.0,
+      "total_amount": 960.0,
+      "currency": "EUR",
+      "line_items": [
+        {
+          "description": "Security Architecture Review",
+          "quantity": 2,
+          "unit_price": 250.0,
+          "total": 500.0
+        },
+        {
+          "description": "Penetration Testing",
+          "quantity": 1,
+          "unit_price": 300.0,
+          "total": 300.0
+        }
+      ]
+    }
+  },
+  {
+    "id": "doc_08",
+    "file": "files/08_services_invoice.csv",
+    "category": "csv",
+    "description": "Multi-row CSV invoice in GBP",
+    "expected_math_valid": true,
+    "ground_truth": {
+      "invoice_number": "CSV-5501",
+      "invoice_date": "2024-06-15",
+      "supplier_name": "Britannia Cloud Ltd",
+      "customer_name": "Thames Analytics",
+      "subtotal": 900.0,
+      "tax": 180.0,
+      "total_amount": 1080.0,
+      "currency": "GBP",
+      "line_items": [
+        {
+          "description": "Dedicated Compute Node",
+          "quantity": 2,
+          "unit_price": 250.0,
+          "total": 500.0
+        },
+        {
+          "description": "Managed PostgreSQL DB",
+          "quantity": 1,
+          "unit_price": 400.0,
+          "total": 400.0
+        }
+      ]
+    }
+  },
+  {
+    "id": "doc_09",
+    "file": "files/09_incomplete_null_fields.pdf",
+    "category": "incomplete_pdf",
+    "description": "Incomplete invoice missing invoice_date, tax, and currency (hallucination check)",
+    "expected_math_valid": true,
+    "ground_truth": {
+      "invoice_number": "INC-0099",
+      "invoice_date": null,
+      "supplier_name": "Delta Field Services",
+      "customer_name": "Pioneer Energy",
+      "subtotal": 320.0,
+      "tax": null,
+      "total_amount": 320.0,
+      "currency": null,
+      "line_items": [
+        {
+          "description": "Field Inspection Fee",
+          "quantity": 1,
+          "unit_price": 320.0,
+          "total": 320.0
+        }
+      ]
+    }
+  },
+  {
+    "id": "doc_10",
+    "file": "files/10_math_discrepancy.pdf",
+    "category": "discrepancy_pdf",
+    "description": "Invoice with deliberate arithmetic discrepancy (400 + 40 != 480)",
+    "expected_math_valid": false,
+    "ground_truth": {
+      "invoice_number": "INV-ERR-9920",
+      "invoice_date": "2024-06-01",
+      "supplier_name": "Global Hardware Corp.",
+      "customer_name": "Matrix Logistics",
+      "subtotal": 400.0,
+      "tax": 40.0,
+      "total_amount": 480.0,
+      "currency": "USD",
+      "line_items": [
+        {
+          "description": "Industrial Router",
+          "quantity": 1,
+          "unit_price": 400.0,
+          "total": 400.0
+        }
+      ]
+    }
+  }
+]
