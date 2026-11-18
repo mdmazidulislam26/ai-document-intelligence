@@ -1,4 +1,4 @@
-# Document Intelligence Evaluation Report (Measured Benchmark)
+# Document Intelligence Evaluation Report (10-Document Synthetic Benchmark)
 
 ## 1. Dataset & Methodology
 - **Total Labeled Documents:** 10 (Digital 1-page & 12-page PDFs, clean & skewed/noisy scanned PDFs, PNG & degraded JPG images, multi-sheet XLSX, CSV, incomplete null-field PDF, and math-discrepancy PDF).
@@ -54,5 +54,5 @@
 ## 5. Dataset Limitations & Candid Observations
 - **Degraded Scans (`doc_04`):** With 2.5° skew, speckle noise, and low contrast, Tesseract OCR yielded unreadable text, resulting in 0/8 fields extracted. This document is correctly classified as `math_status = not_evaluable` rather than an arithmetic pass.
 - **JPEG Character Degradation (`doc_06`):** Low quality JPEG artifact caused 1 character OCR misreading (`Greenfieid` vs `Greenfield`), resulting in 7/8 scalar accuracy.
-- **Hallucination Evaluation:** Tested on 4 deliberately null truth fields (missing tax, currency, and invoice_date across `doc_05` and `doc_09`). The zero-hallucination constraint achieved 0.00% (0/4 invented).
+- **Hallucination Evaluation:** On this 10-document synthetic dataset, 4 ground-truth fields were deliberately null (missing tax, currency, and invoice_date across `doc_05` and `doc_09`); 0/4 were populated by the extractor. This is a small-sample observation, not a general zero-hallucination guarantee.
 - Re-run anytime via `python evaluation/generate_dataset.py && python evaluation/evaluate.py`.

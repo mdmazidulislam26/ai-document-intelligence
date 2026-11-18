@@ -26,15 +26,23 @@ def test_permanent_parser_error_marks_document_failed(mock_parser):
     mock_doc.id = 101
     mock_doc.file_path = "/tmp/test_corrupt.pdf"
     mock_doc.status = "queued"
+    mock_doc.lease_epoch = 0
+    mock_doc.worker_id = None
+    mock_doc.processing_lease_until = None
 
     mock_session = MagicMock()
-    mock_session.query.return_value.filter.return_value.with_for_update.return_value.first.return_value = mock_doc
+    query_result = mock_session.query.return_value.filter.return_value
+    query_result.with_for_update.return_value.first.return_value = mock_doc
+    query_result.update.return_value = 1
+    query_result.all.return_value = []
 
     with patch("tasks.processing_tasks.SessionLocalSync", return_value=mock_session):
         res = process_document_task(101)
         assert res is False
-        assert mock_doc.status == "failed"
-        assert "Corrupted PDF streams" in mock_doc.error_message
+        update_values = query_result.update.call_args.args[0]
+        assert update_values[Document.status] == "failed"
+        assert "Corrupted PDF streams" in update_values[Document.error_message]
+        mock_session.commit.assert_called()
 
 
 def test_transient_http_error_invokes_retry():
@@ -43,9 +51,15 @@ def test_transient_http_error_invokes_retry():
     mock_doc.id = 202
     mock_doc.file_path = "/tmp/test.pdf"
     mock_doc.status = "queued"
+    mock_doc.lease_epoch = 0
+    mock_doc.worker_id = None
+    mock_doc.processing_lease_until = None
 
     mock_session = MagicMock()
-    mock_session.query.return_value.filter.return_value.with_for_update.return_value.first.return_value = mock_doc
+    query_result = mock_session.query.return_value.filter.return_value
+    query_result.with_for_update.return_value.first.return_value = mock_doc
+    query_result.update.return_value = 1
+    query_result.all.return_value = []
 
     with patch("tasks.processing_tasks.SessionLocalSync", return_value=mock_session), \
          patch("tasks.processing_tasks.DocumentParserService.extract_full_text", return_value=("Sample text", 1)), \

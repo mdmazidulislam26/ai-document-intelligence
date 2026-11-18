@@ -8,6 +8,8 @@ Regression tests for Hotfix Batch A addressing Phase 5.2 Independent Review find
 """
 
 import os
+import sys
+import re
 import json
 import uuid
 import tempfile
@@ -16,9 +18,16 @@ from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 import pytest
 from fastapi import HTTPException
+from celery.exceptions import MaxRetriesExceededError, Retry
 from httpx import AsyncClient, ASGITransport
 from sqlalchemy import create_engine, text
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
+
+BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+REPO_ROOT = os.path.dirname(BACKEND_DIR)
+for import_root in (REPO_ROOT, BACKEND_DIR):
+    if import_root not in sys.path:
+        sys.path.insert(0, import_root)
 
 from core.config import Settings, settings
 from core.database import get_db
@@ -27,15 +36,15 @@ from core.security import verify_api_key
 from main import app
 from models.schemas import InvoiceExtractionSchema, LineItemSchema
 from tasks.processing_tasks import process_document_task
+from services.ai_extractor import AITransientError
+from evaluation.evaluate import classify_arithmetic_status
 
-BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-REPO_ROOT = os.path.dirname(BACKEND_DIR)
 DEV_HEADERS = {"X-API-Key": "dev-local-api-key-change-me"}
 
 
 def test_production_rejects_placeholder_and_weak_secrets():
     """Security Hotfix: public .env.example placeholders must fail closed in production."""
-    strong_secret = "a" * 40
+    strong_secret = "R4nd0m!Prod-Auth-Key_2026#G7x9vP2s"
     strong_db = "postgresql+asyncpg://appuser:Str0ngProdPass!99@db:5432/doc_intelligence"
     strong_sync_db = "postgresql+psycopg2://appuser:Str0ngProdPass!99@db:5432/doc_intelligence"
     strong_keys = json.dumps({"prod-key-9876543210abcdef": {"owner_id": "acme", "role": "user"}})
@@ -85,10 +94,33 @@ def test_production_rejects_placeholder_and_weak_secrets():
         DATABASE_URL="postgresql+asyncpg://postgres:postgres@db:5432/doc_intelligence",
         SYNC_DATABASE_URL=strong_sync_db,
     )
-    with pytest.raises(RuntimeError, match="database credentials"):
+    with pytest.raises(RuntimeError, match="database password"):
         s_bad_db.validate_production_security()
 
-    # 5. Valid strong production config passes
+    # 5. Long but repetitive secrets must not pass merely because of length
+    s_repeated_secret = Settings(
+        ENVIRONMENT="production",
+        AUTH_SECRET_KEY="a" * 40,
+        API_KEYS_JSON=strong_keys,
+        DATABASE_URL=strong_db,
+        SYNC_DATABASE_URL=strong_sync_db,
+    )
+    with pytest.raises(RuntimeError, match="AUTH_SECRET_KEY"):
+        s_repeated_secret.validate_production_security()
+
+    # 6. Reject generic weak database passwords even when longer than 16 chars.
+    weak_password_db = "postgresql+asyncpg://appuser:weakpassword123456@db:5432/doc_intelligence"
+    s_weak_db = Settings(
+        ENVIRONMENT="production",
+        AUTH_SECRET_KEY=strong_secret,
+        API_KEYS_JSON=strong_keys,
+        DATABASE_URL=weak_password_db,
+        SYNC_DATABASE_URL=strong_sync_db,
+    )
+    with pytest.raises(RuntimeError, match="database password"):
+        s_weak_db.validate_production_security()
+
+    # 7. Valid high-entropy production config passes
     s_ok = Settings(
         ENVIRONMENT="production",
         AUTH_SECRET_KEY=strong_secret,
@@ -120,7 +152,17 @@ def test_ghr08_prod_compose_requires_explicit_secrets_and_separate_migrate():
         assert "${AUTH_SECRET_KEY:?" in content
         assert "migrate:" in content
         assert "service_completed_successfully" in content
-        assert "--reload" not in content
+
+        # Inspect actual command fields; comments must not affect the assertion.
+        for service_name in ("backend", "celery_worker"):
+            service_match = re.search(
+                rf"(?ms)^  {service_name}:\n(.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)",
+                content,
+            )
+            assert service_match, f"Missing production service: {service_name}"
+            command_match = re.search(r"(?m)^\s+command:\s*(.+)$", service_match.group(1))
+            assert command_match, f"Missing command for production service: {service_name}"
+            assert "--reload" not in command_match.group(1), f"Development reload enabled for {service_name}"
 
 
 def test_ghr01_retry_cannot_bypass_active_lease_and_stale_worker_fenced_out():
@@ -298,3 +340,197 @@ def test_ghr07_concurrent_rate_limiting_and_prod_fail_closed():
             assert exc_info.value.status_code == 503
     finally:
         RateLimiter.reset()
+
+
+@pytest.mark.parametrize(
+    "failure_stage",
+    ["parser_exception", "empty_text", "transient_max_retries", "unexpected_exception"],
+)
+def test_ghr01_stale_worker_failure_paths_cannot_overwrite_new_lease(failure_stage):
+    """Every terminal error path must CAS against the worker's claimed epoch."""
+    engine = create_engine(settings.SYNC_DATABASE_URL)
+    doc_id = None
+    fd, path = tempfile.mkstemp(suffix=".pdf")
+    os.close(fd)
+    with open(path, "wb") as f:
+        f.write(b"%PDF-1.4\\n%stale-failure-fencing")
+
+    def simulate_takeover():
+        with engine.connect() as conn:
+            conn.execute(
+                text("""
+                    UPDATE documents
+                    SET status = 'queued', worker_id = NULL,
+                        processing_lease_until = NULL, last_heartbeat_at = NULL,
+                        lease_epoch = 12
+                    WHERE id = :id
+                """),
+                {"id": doc_id},
+            )
+            conn.commit()
+
+    try:
+        with engine.connect() as conn:
+            doc_id = conn.execute(
+                text("""
+                    INSERT INTO documents
+                        (owner_id, filename, file_path, file_type, file_size_bytes, status,
+                         worker_id, lease_epoch, processing_lease_until, last_heartbeat_at, created_at, updated_at)
+                    VALUES
+                        ('default', 'stale-failure.pdf', :fp, '.pdf', 64, 'queued',
+                         NULL, 10, NULL, NULL, NOW(), NOW())
+                    RETURNING id
+                """),
+                {"fp": path},
+            ).scalar()
+            conn.execute(
+                text("""
+                    INSERT INTO task_outbox (document_id, task_name, status, attempts, created_at, next_attempt_at)
+                    VALUES (:id, 'tasks.processing_tasks.process_document_task', 'pending', 0, NOW(), NOW())
+                """),
+                {"id": doc_id},
+            )
+            conn.commit()
+
+        parser = patch("tasks.processing_tasks.DocumentParserService.extract_full_text")
+        extractor = patch("tasks.processing_tasks.AIExtractorService.extract_invoice_data")
+        embedder = patch("tasks.processing_tasks.VectorService.generate_embedding")
+        with patch.object(settings, "WORKER_HEARTBEAT_INTERVAL_SECONDS", 0), parser as parse_mock, extractor as ai_mock, embedder as embed_mock:
+            if failure_stage == "parser_exception":
+                def fail_parser(_path):
+                    simulate_takeover()
+                    raise ValueError("simulated parser failure")
+                parse_mock.side_effect = fail_parser
+            elif failure_stage == "empty_text":
+                def return_empty(_path):
+                    simulate_takeover()
+                    return ("", 0)
+                parse_mock.side_effect = return_empty
+            else:
+                parse_mock.return_value = ("Invoice INV-TEST total 10.00 USD", 1)
+                if failure_stage == "transient_max_retries":
+                    def fail_ai(_raw_text):
+                        simulate_takeover()
+                        raise AITransientError("simulated transient provider failure")
+                    ai_mock.side_effect = fail_ai
+                else:
+                    ai_mock.return_value = InvoiceExtractionSchema(
+                        invoice_number="INV-TEST",
+                        invoice_date="2024-06-01",
+                        supplier_name="Test Supplier",
+                        subtotal=Decimal("10.00"),
+                        tax=Decimal("0.00"),
+                        total_amount=Decimal("10.00"),
+                        currency="USD",
+                    )
+                    def fail_embedding(_summary):
+                        simulate_takeover()
+                        raise RuntimeError("simulated unexpected embedding failure")
+                    embed_mock.side_effect = fail_embedding
+
+            if failure_stage == "transient_max_retries":
+                with patch.object(process_document_task.request, "retries", 3), \
+                     patch.object(process_document_task, "retry", side_effect=MaxRetriesExceededError()):
+                    result = process_document_task(doc_id)
+            else:
+                result = process_document_task(doc_id)
+
+        assert result is False
+        with engine.connect() as conn:
+            row = conn.execute(
+                text("SELECT status, worker_id, lease_epoch FROM documents WHERE id = :id"),
+                {"id": doc_id},
+            ).mappings().first()
+            assert row["status"] == "queued"
+            assert row["worker_id"] is None
+            assert row["lease_epoch"] == 12
+
+            outbox = conn.execute(
+                text("SELECT status, last_error FROM task_outbox WHERE document_id = :id"),
+                {"id": doc_id},
+            ).mappings().first()
+            assert outbox["status"] == "pending"
+            assert outbox["last_error"] is None
+    finally:
+        if doc_id is not None:
+            with engine.connect() as conn:
+                conn.execute(text("DELETE FROM documents WHERE id = :id"), {"id": doc_id})
+                conn.commit()
+        engine.dispose()
+        if os.path.exists(path):
+            os.remove(path)
+
+
+@pytest.mark.parametrize(
+    "subtotal,total,expected",
+    [
+        (Decimal("10.00"), Decimal("10.00"), "pass"),
+        (None, Decimal("10.00"), "not_evaluable"),
+        (Decimal("10.00"), None, "not_evaluable"),
+        (None, None, "not_evaluable"),
+    ],
+)
+def test_ghr06_arithmetic_status_requires_both_essential_amounts(subtotal, total, expected):
+    extracted = InvoiceExtractionSchema(subtotal=subtotal, total_amount=total)
+    assert classify_arithmetic_status(extracted, []) == expected
+
+
+def test_ghr06_arithmetic_errors_never_classify_as_pass():
+    extracted = InvoiceExtractionSchema(subtotal=Decimal("10.00"), total_amount=Decimal("12.00"))
+    assert classify_arithmetic_status(extracted, [object()]) == "fail"
+
+
+def test_ghr01_celery_retry_releases_current_worker_lease_and_propagates():
+    """A retry must free its own lease so the scheduled retry can claim the document."""
+    engine = create_engine(settings.SYNC_DATABASE_URL)
+    doc_id = None
+    fd, path = tempfile.mkstemp(suffix=".pdf")
+    os.close(fd)
+    with open(path, "wb") as f:
+        f.write(b"%PDF-1.4\\n%celery-retry-release")
+
+    try:
+        with engine.connect() as conn:
+            doc_id = conn.execute(
+                text("""
+                    INSERT INTO documents
+                        (owner_id, filename, file_path, file_type, file_size_bytes, status,
+                         worker_id, lease_epoch, processing_lease_until, last_heartbeat_at, created_at, updated_at)
+                    VALUES
+                        ('default', 'retry-release.pdf', :fp, '.pdf', 64, 'queued',
+                         NULL, 4, NULL, NULL, NOW(), NOW())
+                    RETURNING id
+                """),
+                {"fp": path},
+            ).scalar()
+            conn.commit()
+
+        def transient_failure(_raw_text):
+            raise AITransientError("simulated transient provider failure")
+
+        with patch.object(settings, "WORKER_HEARTBEAT_INTERVAL_SECONDS", 0), \
+             patch("tasks.processing_tasks.DocumentParserService.extract_full_text", return_value=("Invoice INV-RETRY total 10.00 USD", 1)), \
+             patch("tasks.processing_tasks.AIExtractorService.extract_invoice_data", side_effect=transient_failure), \
+             patch.object(process_document_task.request, "retries", 0), \
+             patch.object(process_document_task, "retry", side_effect=Retry("scheduled")):
+            with pytest.raises(Retry):
+                process_document_task(doc_id)
+
+        with engine.connect() as conn:
+            row = conn.execute(
+                text("SELECT status, worker_id, lease_epoch, processing_lease_until, last_heartbeat_at FROM documents WHERE id = :id"),
+                {"id": doc_id},
+            ).mappings().first()
+            assert row["status"] == "queued"
+            assert row["worker_id"] is None
+            assert row["lease_epoch"] == 5
+            assert row["processing_lease_until"] is None
+            assert row["last_heartbeat_at"] is None
+    finally:
+        if doc_id is not None:
+            with engine.connect() as conn:
+                conn.execute(text("DELETE FROM documents WHERE id = :id"), {"id": doc_id})
+                conn.commit()
+        engine.dispose()
+        if os.path.exists(path):
+            os.remove(path)

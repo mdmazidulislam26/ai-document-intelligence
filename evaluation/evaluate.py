@@ -140,7 +140,7 @@ def classify_arithmetic_status(extracted: InvoiceExtractionSchema, math_errors: 
     sub_dec = to_decimal(extracted.subtotal)
     tot_dec = to_decimal(extracted.total_amount)
 
-    if sub_dec is None and tot_dec is None:
+    if sub_dec is None or tot_dec is None:
         return "not_evaluable"
 
     return "pass" if len(math_errors) == 0 else "fail"

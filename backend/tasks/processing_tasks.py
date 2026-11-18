@@ -17,7 +17,7 @@ import threading
 from datetime import datetime, timedelta
 from decimal import Decimal
 import httpx
-from celery.exceptions import MaxRetriesExceededError
+from celery.exceptions import MaxRetriesExceededError, Retry
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 
@@ -154,6 +154,93 @@ def _clear_lease_fields(doc: Document) -> None:
     doc.last_heartbeat_at = None
 
 
+def _release_document_lease_for_retry(
+    session,
+    document_id: int,
+    worker_id: str,
+    expected_epoch: int,
+) -> bool:
+    """Return the document to queued only if this worker still owns its lease.
+
+    A Celery retry message must not immediately collide with the previous
+    attempt's still-active lease. The CAS makes lease release safe when a
+    reclaimer or newer worker has already taken ownership.
+    """
+    now = datetime.utcnow()
+    updated = (
+        session.query(Document)
+        .filter(
+            Document.id == document_id,
+            Document.status == "processing",
+            Document.worker_id == worker_id,
+            Document.lease_epoch == expected_epoch,
+        )
+        .update(
+            {
+                Document.status: "queued",
+                Document.worker_id: None,
+                Document.processing_lease_until: None,
+                Document.last_heartbeat_at: None,
+                Document.updated_at: now,
+            },
+            synchronize_session=False,
+        )
+    )
+    if not updated:
+        session.rollback()
+        logger.warning(
+            f"Document #{document_id} retry release fenced out; "
+            f"worker={worker_id}, epoch={expected_epoch}."
+        )
+        return False
+
+    session.commit()
+    return True
+
+
+def _fail_document_if_still_owned(
+    session,
+    document_id: int,
+    worker_id: str,
+    expected_epoch: int,
+    error_message: str,
+) -> bool:
+    """Atomically write failure only while this worker still owns its lease."""
+    now = datetime.utcnow()
+    updated = (
+        session.query(Document)
+        .filter(
+            Document.id == document_id,
+            Document.status == "processing",
+            Document.worker_id == worker_id,
+            Document.lease_epoch == expected_epoch,
+        )
+        .update(
+            {
+                Document.status: "failed",
+                Document.error_message: error_message,
+                Document.worker_id: None,
+                Document.processing_lease_until: None,
+                Document.last_heartbeat_at: None,
+                Document.updated_at: now,
+            },
+            synchronize_session=False,
+        )
+    )
+    if not updated:
+        session.rollback()
+        logger.warning(
+            f"Document #{document_id} failure write fenced out; "
+            f"worker={worker_id}, epoch={expected_epoch}."
+        )
+        return False
+
+    # Do not alter the outbox unless the document CAS succeeded.
+    _mark_outbox_status(session, document_id, "failed", error_message)
+    session.commit()
+    return True
+
+
 @celery_app.task(name="tasks.processing_tasks.process_document_task", bind=True, max_retries=3)
 def process_document_task(self, document_id: int):
     """
@@ -162,6 +249,7 @@ def process_document_task(self, document_id: int):
     session = SessionLocalSync()
     worker_id = _generate_worker_id()
     doc = None
+    claimed_epoch = None
 
     try:
         doc = session.query(Document).filter(Document.id == document_id).with_for_update().first()
@@ -203,19 +291,17 @@ def process_document_task(self, document_id: int):
             try:
                 raw_text, _ = DocumentParserService.extract_full_text(doc.file_path)
             except Exception as parse_err:
-                doc.status = "failed"
-                doc.error_message = f"File parsing failed: {str(parse_err)}"
-                _clear_lease_fields(doc)
-                _mark_outbox_status(session, document_id, "failed", doc.error_message)
-                session.commit()
+                _fail_document_if_still_owned(
+                    session, document_id, worker_id, claimed_epoch,
+                    f"File parsing failed: {str(parse_err)}",
+                )
                 return False
 
             if not raw_text.strip():
-                doc.status = "failed"
-                doc.error_message = "No readable text extracted from document."
-                _clear_lease_fields(doc)
-                _mark_outbox_status(session, document_id, "failed", doc.error_message)
-                session.commit()
+                _fail_document_if_still_owned(
+                    session, document_id, worker_id, claimed_epoch,
+                    "No readable text extracted from document.",
+                )
                 return False
 
             ai_service = AIExtractorService()
@@ -337,24 +423,37 @@ def process_document_task(self, document_id: int):
             raise self.retry(exc=trans_exc, countdown=backoff)
         except MaxRetriesExceededError:
             logger.error(f"Max retries exceeded for document #{document_id}.")
-            if doc:
-                doc.status = "failed"
-                doc.error_message = f"Transient failure max retries exceeded: {str(trans_exc)}"
-                _clear_lease_fields(doc)
-                _mark_outbox_status(session, document_id, "failed", doc.error_message)
-                session.commit()
+            if doc is not None and claimed_epoch is not None:
+                _fail_document_if_still_owned(
+                    session, document_id, worker_id, claimed_epoch,
+                    f"Transient failure max retries exceeded: {str(trans_exc)}",
+                )
             return False
+        except Retry:
+            # An exception raised inside this except block cannot be caught by
+            # a sibling outer except. Release the lease here before re-raising.
+            if doc is not None and claimed_epoch is not None:
+                _release_document_lease_for_retry(session, document_id, worker_id, claimed_epoch)
+            else:
+                session.rollback()
+            raise
+
+    except Retry:
+        # Also handle Retry raised by any other part of the processing pipeline.
+        if doc is not None and claimed_epoch is not None:
+            _release_document_lease_for_retry(session, document_id, worker_id, claimed_epoch)
+        else:
+            session.rollback()
+        raise
 
     except Exception as e:
         session.rollback()
         logger.exception(f"Permanent/Unhandled error processing doc #{document_id}: {type(e).__name__}")
         try:
-            if doc:
-                doc.status = "failed"
-                doc.error_message = str(e)
-                _clear_lease_fields(doc)
-                _mark_outbox_status(session, document_id, "failed", doc.error_message)
-                session.commit()
+            if doc is not None and claimed_epoch is not None:
+                _fail_document_if_still_owned(
+                    session, document_id, worker_id, claimed_epoch, str(e)
+                )
         except Exception:
             session.rollback()
         return False

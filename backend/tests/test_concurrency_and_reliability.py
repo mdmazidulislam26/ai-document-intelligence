@@ -39,9 +39,13 @@ def test_retry_exhaustion_marks_document_failed():
     mock_doc.status = "queued"
     mock_doc.processing_lease_until = None
     mock_doc.worker_id = None
+    mock_doc.lease_epoch = 0
 
     mock_session = MagicMock()
-    mock_session.query.return_value.filter.return_value.with_for_update.return_value.first.return_value = mock_doc
+    query_result = mock_session.query.return_value.filter.return_value
+    query_result.with_for_update.return_value.first.return_value = mock_doc
+    query_result.update.return_value = 1
+    query_result.all.return_value = []
 
     with patch("tasks.processing_tasks.SessionLocalSync", return_value=mock_session), \
          patch("tasks.processing_tasks.DocumentParserService.extract_full_text", return_value=("Sample text", 1)), \
@@ -50,8 +54,10 @@ def test_retry_exhaustion_marks_document_failed():
 
         res = process_document_task(303)
         assert res is False
-        assert mock_doc.status == "failed"
-        assert "max retries exceeded" in mock_doc.error_message.lower()
+        update_values = query_result.update.call_args.args[0]
+        assert update_values[Document.status] == "failed"
+        assert "max retries exceeded" in update_values[Document.error_message].lower()
+        mock_session.commit.assert_called()
 
 
 def test_duplicate_delivery_is_idempotent_on_terminal_status():
