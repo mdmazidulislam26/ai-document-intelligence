@@ -18,7 +18,7 @@ from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 import pytest
 from fastapi import HTTPException
-from celery.exceptions import MaxRetriesExceededError
+from celery.exceptions import MaxRetriesExceededError, Retry
 from httpx import AsyncClient, ASGITransport
 from sqlalchemy import create_engine, text
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
@@ -478,3 +478,59 @@ def test_ghr06_arithmetic_status_requires_both_essential_amounts(subtotal, total
 def test_ghr06_arithmetic_errors_never_classify_as_pass():
     extracted = InvoiceExtractionSchema(subtotal=Decimal("10.00"), total_amount=Decimal("12.00"))
     assert classify_arithmetic_status(extracted, [object()]) == "fail"
+
+
+def test_ghr01_celery_retry_releases_current_worker_lease_and_propagates():
+    """A retry must free its own lease so the scheduled retry can claim the document."""
+    engine = create_engine(settings.SYNC_DATABASE_URL)
+    doc_id = None
+    fd, path = tempfile.mkstemp(suffix=".pdf")
+    os.close(fd)
+    with open(path, "wb") as f:
+        f.write(b"%PDF-1.4\\n%celery-retry-release")
+
+    try:
+        with engine.connect() as conn:
+            doc_id = conn.execute(
+                text("""
+                    INSERT INTO documents
+                        (owner_id, filename, file_path, file_type, file_size_bytes, status,
+                         worker_id, lease_epoch, processing_lease_until, last_heartbeat_at, created_at, updated_at)
+                    VALUES
+                        ('default', 'retry-release.pdf', :fp, '.pdf', 64, 'queued',
+                         NULL, 4, NULL, NULL, NOW(), NOW())
+                    RETURNING id
+                """),
+                {"fp": path},
+            ).scalar()
+            conn.commit()
+
+        def transient_failure(_raw_text):
+            raise AITransientError("simulated transient provider failure")
+
+        with patch.object(settings, "WORKER_HEARTBEAT_INTERVAL_SECONDS", 0), \
+             patch("tasks.processing_tasks.DocumentParserService.extract_full_text", return_value=("Invoice INV-RETRY total 10.00 USD", 1)), \
+             patch("tasks.processing_tasks.AIExtractorService.extract_invoice_data", side_effect=transient_failure), \
+             patch.object(process_document_task.request, "retries", 0), \
+             patch.object(process_document_task, "retry", side_effect=Retry("scheduled")):
+            with pytest.raises(Retry):
+                process_document_task(doc_id)
+
+        with engine.connect() as conn:
+            row = conn.execute(
+                text("SELECT status, worker_id, lease_epoch, processing_lease_until, last_heartbeat_at FROM documents WHERE id = :id"),
+                {"id": doc_id},
+            ).mappings().first()
+            assert row["status"] == "queued"
+            assert row["worker_id"] is None
+            assert row["lease_epoch"] == 5
+            assert row["processing_lease_until"] is None
+            assert row["last_heartbeat_at"] is None
+    finally:
+        if doc_id is not None:
+            with engine.connect() as conn:
+                conn.execute(text("DELETE FROM documents WHERE id = :id"), {"id": doc_id})
+                conn.commit()
+        engine.dispose()
+        if os.path.exists(path):
+            os.remove(path)
