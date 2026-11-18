@@ -1,11 +1,12 @@
 """
 Document upload, status querying, retrieval, cross-verification, protected reconciliation,
-and reprocessing endpoints.
+and lease-safe reprocessing endpoints.
 """
 
 import os
 import uuid
 import logging
+from datetime import datetime
 from typing import List, Optional, Dict
 from fastapi import APIRouter, UploadFile, File, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -167,10 +168,6 @@ async def reconcile_outbox_and_stuck_documents(
     principal: AuthPrincipal = Depends(require_admin_or_internal),
     db: AsyncSession = Depends(get_db),
 ):
-    """
-    Reconciles pending TaskOutbox items and expired-lease processing documents.
-    Restricted to ADMIN users or trusted internal service callers (GHR-02).
-    """
     return await OutboxService.reconcile_pending_and_stuck_async(db)
 
 
@@ -256,7 +253,11 @@ async def reprocess_document(
     principal: AuthPrincipal = Depends(get_current_principal),
     db: AsyncSession = Depends(get_db),
 ):
-    query = select(Document).where(Document.id == document_id)
+    """
+    Requeues an owned document safely via transactional outbox.
+    Rejects with 409 Conflict if an active worker currently holds a live processing lease (GHR-01).
+    """
+    query = select(Document).where(Document.id == document_id).with_for_update()
     result = await db.execute(query)
     doc = result.scalars().first()
 
@@ -264,9 +265,21 @@ async def reprocess_document(
         raise HTTPException(status_code=404, detail=f"Document #{document_id} not found.")
     _assert_document_access(doc, principal)
 
+    now = datetime.utcnow()
+    if (
+        doc.status == "processing"
+        and doc.processing_lease_until is not None
+        and doc.processing_lease_until > now
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Document is currently being processed by an active worker. Wait for completion or lease expiry.",
+        )
+
     doc.status = "queued"
     doc.error_message = None
     doc.worker_id = None
+    doc.lease_epoch = (doc.lease_epoch or 0) + 1
     doc.processing_lease_until = None
     doc.last_heartbeat_at = None
 
@@ -307,10 +320,6 @@ async def get_cross_verification_history(
     principal: AuthPrincipal = Depends(get_current_principal),
     db: AsyncSession = Depends(get_db),
 ):
-    """
-    Retrieves persistent cross-verification history for an authorized document.
-    Filters out any history entries whose reference document is not owned by the caller (GHR-03).
-    """
     doc = (await db.execute(select(Document).where(Document.id == document_id))).scalars().first()
     if not doc:
         raise HTTPException(status_code=404, detail=f"Document #{document_id} not found.")

@@ -1,6 +1,6 @@
 """
 Authentication and tenant/owner-scoped authorization utilities.
-Includes admin / trusted-internal-service enforcement for global operations (GHR-02).
+Rejects known placeholder secrets/tokens in production.
 """
 
 import hmac
@@ -11,7 +11,12 @@ import hashlib
 from dataclasses import dataclass
 from typing import Optional
 from fastapi import Header, HTTPException, status
-from core.config import settings
+from core.config import (
+    settings,
+    KNOWN_INSECURE_SECRETS,
+    KNOWN_INSECURE_INTERNAL_TOKENS,
+    KNOWN_INSECURE_API_KEYS,
+)
 
 
 @dataclass(frozen=True)
@@ -34,11 +39,11 @@ def _b64url_decode(data: str) -> bytes:
 
 
 def _get_signing_key() -> bytes:
-    secret = settings.AUTH_SECRET_KEY
-    if settings.ENVIRONMENT.lower() == "production" and (
-        not secret or secret == "dev-insecure-secret-change-in-production"
+    secret = (settings.AUTH_SECRET_KEY or "").strip()
+    if settings.is_production() and (
+        not secret or secret in KNOWN_INSECURE_SECRETS or len(secret) < 32
     ):
-        raise RuntimeError("AUTH_SECRET_KEY must be securely configured in production.")
+        raise RuntimeError("AUTH_SECRET_KEY must be securely configured (>= 32 chars, non-placeholder) in production.")
     return secret.encode("utf-8")
 
 
@@ -79,6 +84,8 @@ def verify_access_token(token: str) -> AuthPrincipal:
             raise ValueError("Missing subject")
         role = str(payload.get("role") or "user")
         return AuthPrincipal(owner_id=owner_id, role=role)
+    except RuntimeError:
+        raise
     except Exception:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -88,8 +95,12 @@ def verify_access_token(token: str) -> AuthPrincipal:
 
 
 def verify_api_key(api_key: str) -> Optional[AuthPrincipal]:
+    if settings.is_production() and api_key in KNOWN_INSECURE_API_KEYS:
+        return None
     configured_keys = settings.get_api_keys()
     for valid_key, meta in configured_keys.items():
+        if settings.is_production() and valid_key in KNOWN_INSECURE_API_KEYS:
+            continue
         if hmac.compare_digest(api_key.encode("utf-8"), valid_key.encode("utf-8")):
             owner_id = str(meta.get("owner_id") or "").strip()
             if not owner_id:
@@ -102,7 +113,6 @@ async def get_current_principal(
     authorization: Optional[str] = Header(default=None),
     x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
 ) -> AuthPrincipal:
-    """Requires a valid Bearer token or X-API-Key header."""
     if authorization and authorization.lower().startswith("bearer "):
         token = authorization[7:].strip()
         if token:
@@ -130,12 +140,15 @@ async def require_admin_or_internal(
     x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
     x_internal_service_token: Optional[str] = Header(default=None, alias="X-Internal-Service-Token"),
 ) -> AuthPrincipal:
-    """
-    Restricts global administrative/system operations (such as /api/documents/reconcile)
-    to either an authenticated admin principal or a valid configured X-Internal-Service-Token.
-    """
     if x_internal_service_token is not None:
         configured_internal = (settings.INTERNAL_SERVICE_TOKEN or "").strip()
+        if settings.is_production() and (
+            configured_internal in KNOWN_INSECURE_INTERNAL_TOKENS or len(configured_internal) < 24
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Internal service token is not securely configured.",
+            )
         if configured_internal and hmac.compare_digest(
             x_internal_service_token.strip().encode("utf-8"),
             configured_internal.encode("utf-8"),

@@ -1,6 +1,6 @@
 """
-Transactional outbox dispatch and lease-aware reconciliation service (GHR-01).
-Only recovers genuinely abandoned 'processing' jobs whose worker lease has expired.
+Transactional outbox dispatch and lease-aware reconciliation service.
+Increments lease_epoch on recovery so any stale previous worker is permanently fenced out.
 """
 
 import logging
@@ -52,14 +52,9 @@ class OutboxService:
 
     @classmethod
     async def reconcile_pending_and_stuck_async(cls, db: AsyncSession) -> Dict[str, int]:
-        """
-        Reconciles pending outbox records AND rescues stuck 'queued' or genuinely expired-lease 'processing' jobs.
-        Active workers renewing their lease (processing_lease_until > now) are NEVER re-queued.
-        """
         now = datetime.utcnow()
         rescued_stuck = 0
 
-        # 1. Rescue documents stuck in 'queued' past threshold without any pending outbox entry
         queued_cutoff = now - timedelta(seconds=cls.STUCK_QUEUED_THRESHOLD_SECONDS)
         stuck_docs_stmt = select(Document).where(
             and_(
@@ -84,7 +79,6 @@ class OutboxService:
                 db.add(TaskOutbox(document_id=doc.id, status="pending", next_attempt_at=now))
                 rescued_stuck += 1
 
-        # 2. Rescue ONLY abandoned 'processing' jobs whose lease has genuinely expired
         orphan_cutoff = now - timedelta(minutes=cls.ORPHAN_NO_LEASE_THRESHOLD_MINUTES)
         expired_lease_stmt = select(Document).where(
             and_(
@@ -103,6 +97,7 @@ class OutboxService:
         for doc in expired_docs:
             doc.status = "queued"
             doc.worker_id = None
+            doc.lease_epoch = (doc.lease_epoch or 0) + 1
             doc.processing_lease_until = None
             doc.last_heartbeat_at = None
             doc.updated_at = now
@@ -133,7 +128,6 @@ class OutboxService:
 
     @classmethod
     def reconcile_pending_and_stuck_sync(cls, session: Session) -> Dict[str, int]:
-        """Synchronous lease-aware reconciliation used by periodic Celery Beat worker task."""
         from tasks.processing_tasks import process_document_task
 
         now = datetime.utcnow()
@@ -179,6 +173,7 @@ class OutboxService:
         for doc in expired_docs:
             doc.status = "queued"
             doc.worker_id = None
+            doc.lease_epoch = (doc.lease_epoch or 0) + 1
             doc.processing_lease_until = None
             doc.last_heartbeat_at = None
             doc.updated_at = now

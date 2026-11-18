@@ -33,10 +33,10 @@ def test_alembic_script_directory_integrity():
     script = ScriptDirectory.from_config(cfg)
     heads = script.get_heads()
     assert len(heads) == 1
-    assert heads[0] == "0008_drop_currency_default"
+    assert heads[0] == "0009_lease_epoch_fencing"
 
     revisions = list(script.walk_revisions())
-    assert len(revisions) >= 8
+    assert len(revisions) >= 9
 
 
 @pytest.fixture
@@ -80,7 +80,7 @@ def test_clean_database_upgrade_and_schema_parity(isolated_pg_schema):
         assert inspector.has_table("alembic_version", schema=schema_name)
 
         doc_cols = {c["name"] for c in inspector.get_columns("documents", schema=schema_name)}
-        assert {"owner_id", "worker_id", "processing_lease_until", "last_heartbeat_at"}.issubset(doc_cols)
+        assert {"owner_id", "worker_id", "lease_epoch", "processing_lease_until", "last_heartbeat_at"}.issubset(doc_cols)
 
 
 def test_legacy_database_upgrade_and_rollback_preserves_data(isolated_pg_schema):
@@ -146,13 +146,14 @@ def test_legacy_database_upgrade_and_rollback_preserves_data(isolated_pg_schema)
         conn.commit()
 
         row = conn.execute(text("""
-            SELECT d.owner_id, e.invoice_number, e.invoice_date, e.subtotal, e.tax, e.total_amount
+            SELECT d.owner_id, d.lease_epoch, e.invoice_number, e.invoice_date, e.subtotal, e.tax, e.total_amount
             FROM extracted_invoices e
             JOIN documents d ON d.id = e.document_id
             WHERE e.document_id = 1
         """)).mappings().first()
 
         assert row["owner_id"] == "default"
+        assert row["lease_epoch"] == 0
         assert row["invoice_number"] == "INV-LEGACY-1"
         assert row["invoice_date"] == date(2024, 5, 15)
         assert row["subtotal"] == Decimal("123.46")

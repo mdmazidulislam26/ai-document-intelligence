@@ -1,7 +1,7 @@
 """
 SQLAlchemy ORM models defining documents, extracted invoice data, validation logs,
 cross-document verification history, and transactional task outbox.
-Preserves unknown (null) currency without silent 'USD' defaulting (GHR-04).
+Includes monotonic lease_epoch fencing token on Document (GHR-01).
 """
 
 from datetime import datetime
@@ -27,7 +27,7 @@ from core.config import settings
 
 
 class Document(Base):
-    """Stores uploaded file metadata, ownership scope, execution lifecycle, and worker lease."""
+    """Stores uploaded file metadata, ownership scope, execution lifecycle, and fenced worker lease."""
     __tablename__ = "documents"
 
     id = Column(Integer, primary_key=True, index=True)
@@ -41,6 +41,7 @@ class Document(Base):
     error_message = Column(Text, nullable=True)
 
     worker_id = Column(String(128), nullable=True)
+    lease_epoch = Column(Integer, nullable=False, default=0, server_default="0")
     processing_lease_until = Column(DateTime, nullable=True, index=True)
     last_heartbeat_at = Column(DateTime, nullable=True)
 
@@ -86,7 +87,6 @@ class ExtractedInvoice(Base):
     subtotal = Column(Numeric(12, 2), nullable=True)
     tax = Column(Numeric(12, 2), nullable=True)
     total_amount = Column(Numeric(12, 2), nullable=True)
-    # Null when currency is unknown/absent in document (GHR-04)
     currency = Column(String(16), nullable=True, default=None)
 
     line_items = Column(JSONB, nullable=False, default=list)

@@ -1,6 +1,6 @@
 """
 Main entry point for the FastAPI Document Intelligence System.
-Fails fast on startup if required database migrations are missing or inconsistent (GHR-05).
+Validates production security configuration and Alembic migration status before serving traffic.
 """
 
 import logging
@@ -21,10 +21,10 @@ logger = logging.getLogger("main")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
-    Lifespan context manager verifying Alembic migration status before serving traffic.
-    Does NOT swallow database or migration failures.
+    Lifespan context manager enforcing production security checks and migration parity.
     """
     logger.info("Starting up Document Intelligence API...")
+    settings.validate_production_security()
     mig_status = await init_db()
     logger.info(f"Database migration verification passed: heads={mig_status.get('current_heads')}")
     yield
@@ -57,7 +57,6 @@ app.include_router(search.router, prefix="/api")
 
 @app.get("/api/health", tags=["Health"])
 async def health_check():
-    """Public service health check endpoint (no sensitive credentials exposed)."""
     return {
         "status": "healthy",
         "environment": settings.ENVIRONMENT,

@@ -1,12 +1,12 @@
 """
 Distributed sliding-window rate limiter (GHR-07).
-Uses deterministic SHA-256 subject hashing (stable across processes)
-and an atomic Redis Lua script so multiple API workers enforce consistent limits
-without exposing sensitive keys or raw IPs in Redis.
+Uses deterministic SHA-256 subject hashing and an atomic Redis Lua script.
+In production, fails closed (503) when Redis is unreachable if RATE_LIMIT_FAIL_CLOSED_IN_PROD=true.
 """
 
 import time
 import hashlib
+import logging
 import threading
 from collections import defaultdict, deque
 from typing import Callable, Optional
@@ -14,8 +14,8 @@ from fastapi import Request, HTTPException, status
 import redis
 from core.config import settings
 
-# Atomic Redis sliding window Lua script: cleans expired entries, checks count,
-# and ONLY adds the new request when under max_requests.
+logger = logging.getLogger("rate_limit")
+
 _SLIDING_WINDOW_LUA = """
 local key = KEYS[1]
 local now = tonumber(ARGV[1])
@@ -36,10 +36,6 @@ return {1, count + 1}
 
 
 def compute_rate_limit_subject(client_host: str, credential: str = "") -> str:
-    """
-    Produces a deterministic, process-independent SHA-256 subject identifier.
-    Never embeds raw API keys, tokens, or raw IP addresses in Redis keys.
-    """
     raw = f"{client_host.strip()}|{credential.strip()}".encode("utf-8")
     return hashlib.sha256(raw).hexdigest()[:32]
 
@@ -104,6 +100,13 @@ class RateLimiter:
                 cls._redis_client = None
                 cls._lua_script = None
 
+        if settings.is_production() and settings.RATE_LIMIT_FAIL_CLOSED_IN_PROD:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Distributed rate limiter unavailable.",
+            )
+
+        logger.warning(f"Redis unavailable for rate limiting bucket='{bucket}'; using process-local degraded fallback.")
         with cls._mem_lock:
             dq = cls._mem_buckets[redis_key]
             cutoff = now - window_seconds

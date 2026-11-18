@@ -1,6 +1,6 @@
 """
 Application configuration module.
-Loads settings from environment variables using Pydantic Settings.
+Enforces strict production security and migration safety policies.
 """
 
 import os
@@ -8,6 +8,28 @@ import json
 from typing import Dict, List, Optional, Union
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+KNOWN_INSECURE_SECRETS = {
+    "dev-insecure-secret-change-in-production",
+    "replace-with-strong-random-32byte-secret",
+    "changeme",
+    "secret",
+}
+
+KNOWN_INSECURE_INTERNAL_TOKENS = {
+    "replace-with-internal-service-secret",
+    "changeme",
+    "internal-secret",
+}
+
+KNOWN_INSECURE_API_KEYS = {
+    "dev-local-api-key-change-me",
+}
+
+KNOWN_WEAK_DB_MARKERS = (
+    "postgres:postgres@",
+    "change_me_strong_postgres_password",
+)
 
 
 class Settings(BaseSettings):
@@ -21,7 +43,7 @@ class Settings(BaseSettings):
     SYNC_DATABASE_URL: str = "postgresql+psycopg2://postgres:postgres@localhost:5432/doc_intelligence"
     REDIS_URL: str = "redis://localhost:6379/0"
 
-    # Migration Safety (GHR-05): None => auto-migrate in dev/test, verify-only fail-fast in production
+    # Migration Safety (GHR-05): production NEVER auto-runs DDL migrations on API startup
     AUTO_RUN_MIGRATIONS: Optional[bool] = None
 
     LLM_PROVIDER: str = "groq"
@@ -44,6 +66,7 @@ class Settings(BaseSettings):
     INTERNAL_SERVICE_TOKEN: str = ""
 
     RATE_LIMIT_ENABLED: bool = True
+    RATE_LIMIT_FAIL_CLOSED_IN_PROD: bool = True
     RATE_LIMIT_UPLOAD_PER_MIN: int = 20
     RATE_LIMIT_SEARCH_PER_MIN: int = 60
     RATE_LIMIT_WRITE_PER_MIN: int = 30
@@ -61,10 +84,54 @@ class Settings(BaseSettings):
             return [i.strip() for i in v.split(",") if i.strip()]
         return v
 
+    def is_production(self) -> bool:
+        return self.ENVIRONMENT.lower() == "production"
+
     def should_auto_migrate(self) -> bool:
+        """
+        Production ALWAYS disables automatic DDL migrations at API startup (GHR-05),
+        even if AUTO_RUN_MIGRATIONS=true was inherited from .env.example.
+        """
+        if self.is_production():
+            return False
         if self.AUTO_RUN_MIGRATIONS is not None:
             return self.AUTO_RUN_MIGRATIONS
-        return self.ENVIRONMENT.lower() != "production"
+        return True
+
+    def validate_production_security(self) -> None:
+        """
+        Fails closed in production if any placeholder/weak secrets, dev API keys,
+        or weak database credentials are configured.
+        """
+        if not self.is_production():
+            return
+
+        secret = (self.AUTH_SECRET_KEY or "").strip()
+        if not secret or secret in KNOWN_INSECURE_SECRETS or len(secret) < 32:
+            raise RuntimeError(
+                "Insecure AUTH_SECRET_KEY in production: must be >= 32 chars and not a placeholder."
+            )
+
+        internal_tok = (self.INTERNAL_SERVICE_TOKEN or "").strip()
+        if internal_tok:
+            if internal_tok in KNOWN_INSECURE_INTERNAL_TOKENS or len(internal_tok) < 24:
+                raise RuntimeError(
+                    "Insecure INTERNAL_SERVICE_TOKEN in production: must be >= 24 chars and not a placeholder."
+                )
+
+        api_keys = self.get_api_keys()
+        if not api_keys:
+            raise RuntimeError("API_KEYS_JSON must configure at least one valid API key in production.")
+
+        for k, meta in api_keys.items():
+            if k in KNOWN_INSECURE_API_KEYS or len(k) < 16:
+                raise RuntimeError("Insecure or development API key detected in production API_KEYS_JSON.")
+            if not isinstance(meta, dict) or not str(meta.get("owner_id") or "").strip():
+                raise RuntimeError("Every API key entry in API_KEYS_JSON must specify a non-empty owner_id.")
+
+        for db_url in (self.DATABASE_URL, self.SYNC_DATABASE_URL):
+            if any(marker in db_url for marker in KNOWN_WEAK_DB_MARKERS):
+                raise RuntimeError("Weak or placeholder database credentials detected in production.")
 
     def get_allowed_origins(self) -> List[str]:
         origins = list(self.ALLOWED_ORIGINS)
