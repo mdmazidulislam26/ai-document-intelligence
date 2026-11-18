@@ -6,19 +6,19 @@ import axios from 'axios';
 import { StatusBadge } from '@/components/StatusBadge';
 import { ValidationAlerts } from '@/components/ValidationAlerts';
 import { ArrowLeft, Save, RotateCcw, CheckCircle } from 'lucide-react';
+import { getApiBaseUrl } from '@/lib/api';
 
 export default function DocumentDetailPage() {
   const params = useParams();
   const router = useRouter();
   const documentId = params.id;
-  const apiUrl = '';
+  const apiUrl = getApiBaseUrl();
 
   const [document, setDocument] = useState<any>(null);
   const [formData, setFormData] = useState<any>({});
   const [isSaving, setIsSaving] = useState(false);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
-  // Helper function to format numbers to 2 decimal places
   const formatDecimals = (val: any) => {
     if (val === null || val === undefined || val === '') return '';
     const num = parseFloat(val);
@@ -73,8 +73,6 @@ export default function DocumentDetailPage() {
   const handleLineItemChange = (index: number, field: string, value: any) => {
     const updated = [...formData.line_items];
     updated[index][field] = value;
-    
-    // Auto recalculate row total if qty or price changes
     if (field === 'quantity' || field === 'unit_price') {
       const q = parseFloat(field === 'quantity' ? value : updated[index].quantity) || 0;
       const p = parseFloat(field === 'unit_price' ? value : updated[index].unit_price) || 0;

@@ -3,11 +3,13 @@
 import React, { useState } from 'react';
 import { useDropzone } from 'react-dropzone';
 import axios from 'axios';
-import { UploadCloud, FileText, Loader2, CheckCircle2 } from 'lucide-react';
+import { UploadCloud, Loader2, CheckCircle2 } from 'lucide-react';
+import { getApiBaseUrl } from '@/lib/api';
 
 export const FileUploader: React.FC<{ onUploadSuccess: () => void }> = ({ onUploadSuccess }) => {
   const [isUploading, setIsUploading] = useState(false);
   const [uploadMessage, setUploadMessage] = useState<string | null>(null);
+  const apiUrl = getApiBaseUrl();
 
   const onDrop = async (acceptedFiles: File[]) => {
     if (acceptedFiles.length === 0) return;
@@ -20,7 +22,6 @@ export const FileUploader: React.FC<{ onUploadSuccess: () => void }> = ({ onUplo
     });
 
     try {
-      const apiUrl = '';
       await axios.post(`${apiUrl}/api/documents/upload`, formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
       });

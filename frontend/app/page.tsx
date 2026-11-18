@@ -5,7 +5,8 @@ import Link from 'next/link';
 import axios from 'axios';
 import { FileUploader } from '@/components/FileUploader';
 import { StatusBadge } from '@/components/StatusBadge';
-import { ArrowUpRight, RefreshCw, Clock } from 'lucide-react';
+import { ArrowUpRight, RefreshCw } from 'lucide-react';
+import { getApiBaseUrl } from '@/lib/api';
 
 interface DocumentRecord {
   id: number;
@@ -24,7 +25,7 @@ interface DocumentRecord {
 export default function DashboardPage() {
   const [documents, setDocuments] = useState<DocumentRecord[]>([]);
   const [loading, setLoading] = useState(true);
-  const apiUrl = '';
+  const apiUrl = getApiBaseUrl();
 
   const fetchDocuments = async () => {
     try {
@@ -39,7 +40,6 @@ export default function DashboardPage() {
 
   useEffect(() => {
     fetchDocuments();
-    // Poll every 5 seconds for status changes
     const interval = setInterval(fetchDocuments, 5000);
     return () => clearInterval(interval);
   }, []);
@@ -97,7 +97,7 @@ export default function DashboardPage() {
                     </td>
                     <td className="px-6 py-4 font-semibold text-slate-900">
                       {doc.extracted_invoice?.total_amount != null
-                        ? `${doc.extracted_invoice.total_amount.toFixed(2)} ${doc.extracted_invoice.currency || 'USD'}`
+                        ? `${Number(doc.extracted_invoice.total_amount).toFixed(2)} ${doc.extracted_invoice.currency || 'USD'}`
                         : <span className="text-slate-400 italic">N/A</span>}
                     </td>
                     <td className="px-6 py-4">

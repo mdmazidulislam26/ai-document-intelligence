@@ -1,13 +1,13 @@
 """
 Document parsing engine with memory-safe streaming, OpenCV deskew OCR,
-and targeted page extraction for large multi-page PDFs (up to 1000 pages).
+configurable OCR resolution, partial-corruption resilience, and zero page-cap
+for large multi-page PDFs (up to 1000 pages).
 """
 
 import os
 import io
-import re
 import logging
-from typing import Generator, Tuple, List, Dict, Any
+from typing import Generator, Tuple, List, Optional
 import cv2
 import numpy as np
 from PIL import Image
@@ -18,10 +18,9 @@ import pandas as pd
 logger = logging.getLogger("document_parser")
 logger.setLevel(logging.INFO)
 
-FINANCIAL_KEYWORDS = {
-    "invoice", "tax invoice", "receipt", "bill to", "total", "subtotal",
-    "amount due", "balance", "vat", "gst", "qty", "description", "unit price"
-}
+# Configurable OCR settings
+OCR_DPI: int = int(os.getenv("OCR_DPI", "200"))
+OCR_MIN_TEXT_CHARS: int = int(os.getenv("OCR_MIN_TEXT_CHARS", "50"))
 
 
 class DocumentParserService:
@@ -54,17 +53,16 @@ class DocumentParserService:
 
     @classmethod
     def ocr_page_image(cls, pil_img: Image.Image) -> str:
-        """High-clarity adaptive OCR pipeline with deskew, upscaling, and Otsu binarization."""
+        """High-clarity adaptive OCR pipeline with deskew and Otsu binarization."""
         cv_img = np.array(pil_img.convert("RGB"))
         cv_img = cls.deskew_image(cv_img)
 
         h, w = cv_img.shape[:2]
         if w < 1600:
-            scale = 2.0
+            scale = 1.5
             cv_img = cv2.resize(cv_img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_CUBIC)
 
         gray = cv2.cvtColor(cv_img, cv2.COLOR_RGB2GRAY)
-        # Apply adaptive contrast enhancement (CLAHE)
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         enhanced = clahe.apply(gray)
         _, thresh = cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
@@ -77,7 +75,11 @@ class DocumentParserService:
 
     @classmethod
     def stream_pdf_pages(cls, file_path: str) -> Generator[Tuple[int, str], None, None]:
-        """Memory-safe generator streaming one PDF page at a time with OCR fallback."""
+        """
+        Memory-safe generator streaming one PDF page at a time.
+        Releases image buffers immediately after processing to prevent RAM bloat on 1000-page files.
+        Resilient to individual page rendering corruptions.
+        """
         try:
             doc = fitz.open(file_path)
         except Exception as e:
@@ -86,14 +88,30 @@ class DocumentParserService:
         try:
             total_pages = len(doc)
             for page_index in range(total_pages):
-                page = doc.load_page(page_index)
-                text = page.get_text("text").strip()
-                # Fallback to OCR if page has negligible digital text
-                if len(text) < 50:
-                    pix = page.get_pixmap(dpi=300)
-                    pil_img = Image.open(io.BytesIO(pix.tobytes("png")))
-                    text = cls.ocr_page_image(pil_img)
-                yield (page_index + 1, text)
+                page_num = page_index + 1
+                try:
+                    page = doc.load_page(page_index)
+                    text = page.get_text("text").strip()
+
+                    # Fallback to OCR only if digital text is insufficient (< 50 chars)
+                    if len(text) < OCR_MIN_TEXT_CHARS:
+                        try:
+                            pix = page.get_pixmap(dpi=OCR_DPI)
+                            img_bytes = pix.tobytes("png")
+                            del pix  # Immediately release PyMuPDF pixmap memory
+
+                            with Image.open(io.BytesIO(img_bytes)) as pil_img:
+                                text = cls.ocr_page_image(pil_img)
+                        except Exception as ocr_err:
+                            logger.warning(f"OCR failed on page {page_num} of {file_path}: {ocr_err}")
+                            text = ""
+
+                    yield (page_num, text)
+
+                except Exception as page_err:
+                    logger.warning(f"Skipping corrupted page {page_num} in {file_path}: {page_err}")
+                    yield (page_num, f"[Page {page_num} unreadable due to corruption]")
+
         finally:
             doc.close()
 
@@ -126,54 +144,23 @@ class DocumentParserService:
     @classmethod
     def extract_full_text(cls, file_path: str) -> Tuple[str, int]:
         """
-        Extracts document text. For large PDFs, applies intelligent page scoring
-        to ensure financial summaries, line items, and metadata are prioritized.
+        Extracts all pages from PDF, image, or spreadsheet without any arbitrary page-cap truncation.
+        Every valid page is preserved in stream order with its page provenance.
         """
         _, ext = os.path.splitext(file_path)
         ext = ext.lower()
 
         if ext == ".pdf":
-            pages_text = []
-            page_scores = []
+            pages_output = []
             page_count = 0
 
-            # Stream pages one by one without keeping unneeded pixmaps in RAM
             for page_num, text in cls.stream_pdf_pages(file_path):
                 page_count += 1
-                pages_text.append((page_num, text))
+                if text.strip():
+                    pages_output.append(f"--- Page {page_num} ---\n{text}")
 
-                # Score page relevance based on financial keywords
-                lower_text = text.lower()
-                matches = sum(1 for kw in FINANCIAL_KEYWORDS if kw in lower_text)
-                page_scores.append((page_num, matches, text))
-
-            if page_count <= 10:
-                # Up to 10 pages, retain full content
-                full = [f"--- Page {p} ---\n{t}" for p, t in pages_text if t.strip()]
-                return "\n\n".join(full), page_count
-
-            # For large PDFs (up to 1000 pages):
-            # Prioritize: First 3 pages, Last 3 pages, and top scoring financial pages
-            selected_pages = set()
-            for p in range(1, min(4, page_count + 1)):
-                selected_pages.add(p)
-            for p in range(max(1, page_count - 2), page_count + 1):
-                selected_pages.add(p)
-
-            # Sort by keyword matches descending
-            sorted_by_score = sorted(page_scores, key=lambda x: x[1], reverse=True)
-            for p_num, score, _ in sorted_by_score:
-                if len(selected_pages) >= 15:
-                    break
-                if score > 0:
-                    selected_pages.add(p_num)
-
-            filtered = [
-                f"--- Page {p} ---\n{t}"
-                for p, t in pages_text
-                if p in selected_pages and t.strip()
-            ]
-            return "\n\n".join(filtered), page_count
+            full_text = "\n\n".join(pages_output)
+            return full_text, page_count
 
         elif ext in [".jpg", ".jpeg", ".png", ".tiff", ".tif"]:
             return cls.parse_image_file(file_path), 1

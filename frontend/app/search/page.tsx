@@ -5,19 +5,20 @@ import Link from 'next/link';
 import axios from 'axios';
 import { Search as SearchIcon, ArrowUpRight, Sparkles } from 'lucide-react';
 import { StatusBadge } from '@/components/StatusBadge';
+import { getApiBaseUrl } from '@/lib/api';
 
 export default function SearchPage() {
   const [query, setQuery] = useState('');
   const [searchType, setSearchType] = useState('hybrid');
   const [results, setResults] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
+  const apiUrl = getApiBaseUrl();
 
   const handleSearch = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!query.trim()) return;
 
     setLoading(true);
-    const apiUrl = '';
     try {
       const res = await axios.get(`${apiUrl}/api/search`, {
         params: { q: query, type: searchType, limit: 15 },
@@ -35,7 +36,7 @@ export default function SearchPage() {
       <div>
         <h1 className="text-2xl font-bold tracking-tight text-slate-900">Hybrid Document Search</h1>
         <p className="text-sm text-slate-500 mt-1">
-          Search invoices using keyword text matching or vector semantic embeddings.
+          Search invoices using keyword text matching, vector embeddings, or Reciprocal Rank Fusion (RRF).
         </p>
       </div>
 
@@ -89,16 +90,16 @@ export default function SearchPage() {
               <div className="flex items-center gap-3">
                 <h3 className="font-semibold text-slate-900 text-base">{item.supplier_name || 'Unknown Supplier'}</h3>
                 <StatusBadge status={item.status} />
-                {item.similarity_score !== null && (
+                {item.rrf_score && (
                   <span className="inline-flex items-center gap-1 text-xs text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded-full font-medium">
-                    <Sparkles className="w-3 h-3" /> Score: {item.similarity_score}
+                    <Sparkles className="w-3 h-3" /> RRF: {item.rrf_score} ({item.match_type})
                   </span>
                 )}
               </div>
               <div className="text-xs text-slate-500 mt-1 flex items-center gap-4">
                 <span>File: {item.filename}</span>
                 <span>Invoice: {item.invoice_number || 'N/A'}</span>
-                <span>Total: {item.total_amount ? `$${item.total_amount.toFixed(2)}` : 'N/A'}</span>
+                <span>Total: {item.total_amount ? `$${Number(item.total_amount).toFixed(2)}` : 'N/A'}</span>
               </div>
             </div>
 

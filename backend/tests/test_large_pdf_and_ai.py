@@ -1,6 +1,6 @@
 """
-Automated unit tests for large PDF page filtering, OCR preprocessing,
-typed AI exceptions, and deterministic multi-chunk merging.
+Automated unit tests for large PDF streaming without page-cap truncation,
+OCR preprocessing, typed AI exceptions, and correct line-item merging.
 """
 
 from unittest.mock import patch, MagicMock
@@ -16,52 +16,91 @@ from services.ai_extractor import (
 from models.schemas import InvoiceExtractionSchema, LineItemSchema
 
 
-def test_large_pdf_page_filtering():
-    """Simulates a 50-page PDF and ensures first pages, last pages, and keyword pages are selected."""
-    # Mock stream_pdf_pages to yield 50 pages where page 48 contains invoice totals
+def test_large_pdf_no_page_cap_all_pages_retained():
+    """Verifies that large PDFs (e.g., 50+ pages) do not drop pages due to an arbitrary 15-page cap."""
     mock_pages = []
-    for i in range(1, 51):
-        if i == 48:
+    for i in range(1, 31):
+        if i == 25:
             mock_pages.append((i, "INVOICE #9900 Total: 450.00 USD Subtotal: 400.00 Tax: 50.00"))
         else:
-            mock_pages.append((i, f"Legal standard clause page content {i}"))
+            mock_pages.append((i, f"Legal standard clause content for page {i}"))
 
     with patch.object(DocumentParserService, "stream_pdf_pages", return_value=mock_pages):
         text, total_pages = DocumentParserService.extract_full_text("/tmp/mock_large.pdf")
-        assert total_pages == 50
-        # Page 48 (which has the financial keywords) must be included
-        assert "Page 48" in text
-        assert "INVOICE #9900" in text
-        # First page and last page must also be included
+        assert total_pages == 30
         assert "Page 1" in text
-        assert "Page 50" in text
+        assert "Page 25" in text
+        assert "INVOICE #9900" in text
+        assert "Page 30" in text
 
 
-def test_merge_extractions_deterministic():
-    """Verifies that multi-chunk extractions merge without duplicate line items or lost totals."""
+def test_partial_corrupted_page_handling():
+    """Ensures a corrupted page does not crash the entire document extraction."""
+    mock_pages = [
+        (1, "Header and Vendor details"),
+        (2, "[Page 2 unreadable due to corruption]"),
+        (3, "Total Amount: 500.00 USD")
+    ]
+    with patch.object(DocumentParserService, "stream_pdf_pages", return_value=mock_pages):
+        text, total_pages = DocumentParserService.extract_full_text("/tmp/mock_partial.pdf")
+        assert total_pages == 3
+        assert "Page 1" in text
+        assert "Page 3" in text
+        assert "Total Amount: 500.00 USD" in text
+
+
+def test_legitimate_identical_line_items_preserved():
+    """Two legitimate identical line items inside the same document must NOT be dropped."""
+    item1 = LineItemSchema(description="Cloud Server", quantity=Decimal("1"), unit_price=Decimal("100.00"), total=Decimal("100.00"))
+    item2 = LineItemSchema(description="Cloud Server", quantity=Decimal("1"), unit_price=Decimal("100.00"), total=Decimal("100.00"))
+
+    doc = InvoiceExtractionSchema(
+        invoice_number="INV-LEGIT-1",
+        subtotal=Decimal("200.00"),
+        total_amount=Decimal("200.00"),
+        line_items=[item1, item2]
+    )
+
+    merged = AIExtractorService.merge_extractions([doc])
+    # Both identical items must be preserved (len == 2)
+    assert len(merged.line_items) == 2
+    assert merged.line_items[0].description == "Cloud Server"
+    assert merged.line_items[1].description == "Cloud Server"
+
+
+def test_chunk_boundary_overlap_duplicate_removed():
+    """Only items repeated at the chunk boundary due to chunk overlap should be deduplicated."""
     chunk1 = InvoiceExtractionSchema(
-        invoice_number="INV-MULTI-1",
-        supplier_name="Global Vendor",
-        currency="USD",
+        invoice_number="INV-CHUNKS",
         line_items=[
-            LineItemSchema(description="Item A", quantity=Decimal("1"), unit_price=Decimal("10.00"), total=Decimal("10.00"))
+            LineItemSchema(description="Widget A", quantity=Decimal("1"), unit_price=Decimal("10.00"), total=Decimal("10.00")),
+            LineItemSchema(description="Widget B", quantity=Decimal("2"), unit_price=Decimal("20.00"), total=Decimal("40.00")), # Boundary item
         ]
     )
     chunk2 = InvoiceExtractionSchema(
-        subtotal=Decimal("30.00"),
-        tax=Decimal("3.00"),
-        total_amount=Decimal("33.00"),
         line_items=[
-            LineItemSchema(description="Item A", quantity=Decimal("1"), unit_price=Decimal("10.00"), total=Decimal("10.00")), # Duplicate item
-            LineItemSchema(description="Item B", quantity=Decimal("2"), unit_price=Decimal("10.00"), total=Decimal("20.00")), # New item
+            LineItemSchema(description="Widget B", quantity=Decimal("2"), unit_price=Decimal("20.00"), total=Decimal("40.00")), # Overlap repeat
+            LineItemSchema(description="Widget C", quantity=Decimal("1"), unit_price=Decimal("50.00"), total=Decimal("50.00")), # New item
         ]
     )
 
     merged = AIExtractorService.merge_extractions([chunk1, chunk2])
-    assert merged.invoice_number == "INV-MULTI-1"
-    assert merged.supplier_name == "Global Vendor"
-    assert merged.total_amount == Decimal("33.00")
-    # Duplicate Item A must be deduplicated: total line items should be 2, not 3
+    # Total unique items should be 3: Widget A, Widget B, Widget C
+    assert len(merged.line_items) == 3
+    descriptions = [it.description for it in merged.line_items]
+    assert descriptions == ["Widget A", "Widget B", "Widget C"]
+
+
+def test_different_quantity_same_description_preserved():
+    """Items with identical descriptions but different quantities/totals are not duplicates."""
+    item1 = LineItemSchema(description="Consulting", quantity=Decimal("5"), unit_price=Decimal("100.00"), total=Decimal("500.00"))
+    item2 = LineItemSchema(description="Consulting", quantity=Decimal("2"), unit_price=Decimal("100.00"), total=Decimal("200.00"))
+
+    doc = InvoiceExtractionSchema(
+        invoice_number="INV-DIFF-QTY",
+        line_items=[item1, item2]
+    )
+    merged = AIExtractorService.merge_extractions([doc])
     assert len(merged.line_items) == 2
 
 

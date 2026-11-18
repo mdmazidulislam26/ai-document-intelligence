@@ -3,14 +3,14 @@ AI information extraction service.
 Uses Groq free API with strict JSON schema outputs.
 Implements typed exceptions for transient/permanent failures,
 zero-hallucination policy (currency is null if not specified),
-and deterministic multi-chunk merging.
+and context-aware multi-chunk line item merging without dropping legitimate identical items.
 """
 
 import json
 import re
 import logging
 from decimal import Decimal
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from openai import OpenAI, APIConnectionError, RateLimitError, AuthenticationError, APIStatusError
 from core.config import settings
 from models.schemas import InvoiceExtractionSchema, LineItemSchema
@@ -37,6 +37,22 @@ class AIAuthenticationError(AIExtractionError):
 class AIMalformedResponseError(AIExtractionError):
     """LLM returned unparseable or schema-violating output."""
     pass
+
+
+def line_items_equal(a: LineItemSchema, b: LineItemSchema) -> bool:
+    """Checks if two line items have identical values across all present fields."""
+    desc_a = (a.description or "").strip().lower()
+    desc_b = (b.description or "").strip().lower()
+    if desc_a != desc_b:
+        return False
+
+    # Compare numeric attributes with None safety
+    for attr in ["quantity", "unit_price", "total"]:
+        val_a = getattr(a, attr, None)
+        val_b = getattr(b, attr, None)
+        if val_a != val_b:
+            return False
+    return True
 
 
 class AIExtractorService:
@@ -136,15 +152,15 @@ class AIExtractorService:
     @classmethod
     def merge_extractions(cls, extractions: List[InvoiceExtractionSchema]) -> InvoiceExtractionSchema:
         """
-        Deterministically merges extractions from multiple chunks without data loss or duplicate line items.
+        Deterministically merges extractions across multiple chunks.
+        Preserves legitimate identical line items while eliminating chunk-overlap duplicates.
         """
         if not extractions:
             return InvoiceExtractionSchema()
 
         merged = InvoiceExtractionSchema()
-        seen_line_items = set()
 
-        for ext in extractions:
+        for chunk_idx, ext in enumerate(extractions):
             # Metadata: Keep first non-null
             if not merged.invoice_number and ext.invoice_number:
                 merged.invoice_number = ext.invoice_number
@@ -165,17 +181,29 @@ class AIExtractorService:
             if merged.total_amount is None and ext.total_amount is not None:
                 merged.total_amount = ext.total_amount
 
-            # Merge line items avoiding duplicates
-            for it in ext.line_items:
-                # Key based on description and total
-                desc_key = (it.description or "").strip().lower()
-                tot_key = str(it.total) if it.total is not None else ""
-                item_id = f"{desc_key}_{tot_key}"
+            # Chunk Line Item Merging:
+            # All items inside chunk 0 are added directly.
+            # In subsequent chunks, remove leading items that match the trailing items of previous chunk (overlap).
+            if chunk_idx == 0:
+                merged.line_items.extend(ext.line_items)
+            else:
+                incoming_items = list(ext.line_items)
+                if merged.line_items and incoming_items:
+                    # Look for overlap: compare tail of merged with head of incoming
+                    max_overlap_check = min(5, len(merged.line_items), len(incoming_items))
+                    overlap_found = 0
 
-                if item_id not in seen_line_items or (not desc_key and not tot_key):
-                    if item_id:
-                        seen_line_items.add(item_id)
-                    merged.line_items.append(it)
+                    for k in range(max_overlap_check, 0, -1):
+                        tail_slice = merged.line_items[-k:]
+                        head_slice = incoming_items[:k]
+                        if all(line_items_equal(t, h) for t, h in zip(tail_slice, head_slice)):
+                            overlap_found = k
+                            break
+
+                    # Append only non-overlapping items
+                    merged.line_items.extend(incoming_items[overlap_found:])
+                else:
+                    merged.line_items.extend(incoming_items)
 
         return merged
 
@@ -191,7 +219,6 @@ class AIExtractorService:
         if len(document_text) <= max_chunk_chars:
             return self.extract_from_chunk(document_text)
 
-        # Chunk document text with 1000 character overlap
         chunks = []
         start = 0
         overlap = 1000

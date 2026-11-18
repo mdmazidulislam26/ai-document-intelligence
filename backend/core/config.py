@@ -4,6 +4,8 @@ Loads settings from environment variables using Pydantic Settings.
 """
 
 import os
+from typing import List, Union
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -35,6 +37,19 @@ class Settings(BaseSettings):
     # File Upload Directory & Constraints
     UPLOAD_DIR: str = "/tmp/doc_intelligence/uploads"
     MAX_UPLOAD_SIZE_MB: int = 50
+
+    # Allowed CORS Origins
+    ALLOWED_ORIGINS: List[str] = [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:8000"
+    ]
+
+    @field_validator("ALLOWED_ORIGINS", mode="before")
+    def assemble_cors_origins(cls, v: Union[str, List[str]]) -> List[str]:
+        if isinstance(v, str):
+            return [i.strip() for i in v.split(",") if i.strip()]
+        return v
 
     model_config = SettingsConfigDict(
         env_file=".env",

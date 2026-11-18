@@ -2,7 +2,7 @@ import React from 'react';
 import { AlertCircle, AlertTriangle } from 'lucide-react';
 
 interface LogItem {
-  rule_name: str;
+  rule_name: string;
   error_description: string;
   severity: string;
 }
