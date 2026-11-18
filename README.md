@@ -1,6 +1,6 @@
 # AI-Powered Document Intelligence System
 
-An enterprise-grade document intelligence system designed to ingest, extract, validate, and index financial documents (PDFs up to 1000 pages, scans, images, Excel spreadsheets, and CSVs) with zero hallucinations, deterministic mathematical validation, async Celery workers, and pgvector hybrid search.
+An enterprise-grade document intelligence system designed to ingest, extract, validate, and index financial documents (PDFs, scans, images, Excel spreadsheets, and CSVs) with schema-constrained extraction, explicit nulls for unknown fields, deterministic mathematical validation, async Celery workers, and pgvector hybrid search.
 
 ---
 
@@ -52,16 +52,18 @@ flowchart TD
 
 2. Key Features
 
-  - Multi-Format Memory-Safe Streaming: Supports digital PDFs, scanned PDFs
-    (OpenCV deskew + Tesseract OCR fallback), JPG, PNG, TIFF, and multi-sheet
-    XLSX/CSV with memory-safe page streaming.
-      - Empirically benchmarked on a 1,000-page PDF: processed in 0.42 seconds
-        (2,360 pages/sec) with bounded Peak RSS memory of 121.7 MB (net
-        growth 0.0 MB).
-  - Zero-Hallucination AI Extraction: Powered by Groq's free
-    llama-3.1-8b-instant with strict JSON Schema output. Any missing or
-    ambiguous field is explicitly returned and stored as null. Measured
-    hallucination rate on missing fields: 0.00%.
+  - Multi-Format Parsing: Supports digital PDFs, scanned PDFs (OpenCV deskew +
+    Tesseract OCR fallback), JPG, PNG, TIFF, and multi-sheet XLSX/CSV. The
+    large-PDF benchmark measures only `stream_pdf_pages()` (the page iterator),
+    not OCR, the full `extract_full_text()` aggregation, or the complete AI pipeline.
+      - The recorded 1,000-page parser-iterator run took 0.42 seconds
+        (2,360 pages/sec; reported peak RSS 121.7 MB). This is a parser-only
+        microbenchmark, not an end-to-end 1,000-page processing guarantee.
+  - Schema-Constrained AI Extraction: Powered by Groq's llama-3.1-8b-instant
+    with structured JSON output. Unknown or ambiguous fields should be null.
+    In the current 10-document synthetic benchmark, 0 of 4 deliberately absent
+    fields were hallucinated; this small sample does not establish a universal
+    zero-hallucination guarantee.
   - Deterministic Validation Engine:
       - \sum \text{Line Items} \approx \text{Subtotal} (tolerance: 0.05).
       - \text{Subtotal} + \text{Tax} \approx \text{Total Amount}.
@@ -111,9 +113,9 @@ docker compose exec backend alembic current
 
 (Expected head revision: 0009_lease_epoch_fencing).
 
-Step C: Run Automated Tests (83/83 Tests)
+Step C: Run Automated Tests
 
-Run the full backend test suite inside the container:
+Run the full backend test suite inside the container and use the actual pytest summary as the test result.
 
 docker compose exec backend pytest tests/ -v
 
@@ -142,15 +144,21 @@ cd frontend && npm run build
 
 4. Production Deployment Safety
 
-In production, start services using the hardened production configuration:
+In production, configure strong random secrets and use the hardened production configuration. The dedicated `migrate` service runs `alembic upgrade head`; the API and worker wait for that one-shot service to complete successfully.
 
-# 1. Back up database
-docker compose exec postgres pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB" > backup.sql
+```bash
+# Back up the database using the configured production credentials
+docker compose exec postgres sh -c 'pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB"' > backup.sql
 
-# 2. Run migrations explicitly before starting API
-docker compose exec backend alembic upgrade head
+# Validate the fully merged production configuration before deployment
+docker compose -f docker-compose.yml -f docker-compose.prod.yml config
 
-# 3. Start with production compose override
-docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+# Start the production stack (including the migration service)
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+
+# Verify service and migration status
+docker compose -f docker-compose.yml -f docker-compose.prod.yml ps
+docker compose -f docker-compose.yml -f docker-compose.prod.yml logs migrate
+```
 
 See backend/MIGRATIONS.md and backend/SECURITY.md for full deployment guides.
