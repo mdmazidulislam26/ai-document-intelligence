@@ -1,6 +1,6 @@
 # Production Docker Compose configuration (GHR-05, GHR-08)
 # Requires explicit environment secrets (no weak defaults), separates migrations
-# into a one-shot 'migrate' service, and disables --reload / auto-migration on API startup.
+# into a one-shot 'migrate' service, and keeps the API in production server mode without startup DDL auto-migration.
 
 services:
   postgres:
