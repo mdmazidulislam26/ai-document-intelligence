@@ -433,8 +433,13 @@ def process_document_task(self, document_id: int):
     except Retry:
         # Release this attempt's lease before Celery delivers the retry message.
         # If ownership was already superseded, the CAS safely does nothing.
+        logger.warning(
+            "Caught Celery Retry for document #%s (doc_loaded=%s, claimed_epoch=%r, worker=%s).",
+            document_id, doc is not None, claimed_epoch, worker_id,
+        )
         if doc is not None and claimed_epoch is not None:
-            _release_document_lease_for_retry(session, document_id, worker_id, claimed_epoch)
+            released = _release_document_lease_for_retry(session, document_id, worker_id, claimed_epoch)
+            logger.warning("Celery retry lease release for document #%s: %s.", document_id, released)
         else:
             session.rollback()
         raise
