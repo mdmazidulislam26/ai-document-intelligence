@@ -148,7 +148,7 @@ In production, configure strong random secrets and use the hardened production c
 
 ```bash
 # Back up the database using the configured production credentials
-docker compose exec postgres sh -c 'pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB"' > backup.sql
+docker compose -f docker-compose.yml -f docker-compose.prod.yml exec postgres sh -c 'pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB"' > backup.sql
 
 # Validate the fully merged production configuration before deployment
 docker compose -f docker-compose.yml -f docker-compose.prod.yml config
