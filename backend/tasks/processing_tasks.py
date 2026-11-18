@@ -154,6 +154,50 @@ def _clear_lease_fields(doc: Document) -> None:
     doc.last_heartbeat_at = None
 
 
+def _release_document_lease_for_retry(
+    session,
+    document_id: int,
+    worker_id: str,
+    expected_epoch: int,
+) -> bool:
+    """Return the document to queued only if this worker still owns its lease.
+
+    A Celery retry message must not immediately collide with the previous
+    attempt's still-active lease. The CAS makes lease release safe when a
+    reclaimer or newer worker has already taken ownership.
+    """
+    now = datetime.utcnow()
+    updated = (
+        session.query(Document)
+        .filter(
+            Document.id == document_id,
+            Document.status == "processing",
+            Document.worker_id == worker_id,
+            Document.lease_epoch == expected_epoch,
+        )
+        .update(
+            {
+                Document.status: "queued",
+                Document.worker_id: None,
+                Document.processing_lease_until: None,
+                Document.last_heartbeat_at: None,
+                Document.updated_at: now,
+            },
+            synchronize_session=False,
+        )
+    )
+    if not updated:
+        session.rollback()
+        logger.warning(
+            f"Document #{document_id} retry release fenced out; "
+            f"worker={worker_id}, epoch={expected_epoch}."
+        )
+        return False
+
+    session.commit()
+    return True
+
+
 def _fail_document_if_still_owned(
     session,
     document_id: int,
@@ -387,8 +431,12 @@ def process_document_task(self, document_id: int):
             return False
 
     except Retry:
-        # Celery Retry is task-control flow; let Celery schedule the next attempt.
-        session.rollback()
+        # Release this attempt's lease before Celery delivers the retry message.
+        # If ownership was already superseded, the CAS safely does nothing.
+        if doc is not None and claimed_epoch is not None:
+            _release_document_lease_for_retry(session, document_id, worker_id, claimed_epoch)
+        else:
+            session.rollback()
         raise
 
     except Exception as e:
