@@ -23,6 +23,12 @@ from httpx import AsyncClient, ASGITransport
 from sqlalchemy import create_engine, text
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 
+BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+REPO_ROOT = os.path.dirname(BACKEND_DIR)
+for import_root in (REPO_ROOT, BACKEND_DIR):
+    if import_root not in sys.path:
+        sys.path.insert(0, import_root)
+
 from core.config import Settings, settings
 from core.database import get_db
 from core.rate_limit import RateLimiter, compute_rate_limit_subject
@@ -31,13 +37,8 @@ from main import app
 from models.schemas import InvoiceExtractionSchema, LineItemSchema
 from tasks.processing_tasks import process_document_task
 from services.ai_extractor import AITransientError
-
-if REPO_ROOT not in sys.path:
-    sys.path.insert(0, REPO_ROOT)
 from evaluation.evaluate import classify_arithmetic_status
 
-BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-REPO_ROOT = os.path.dirname(BACKEND_DIR)
 DEV_HEADERS = {"X-API-Key": "dev-local-api-key-change-me"}
 
 
