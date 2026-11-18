@@ -1,16 +1,15 @@
 """
 AI information extraction service.
 Uses Groq free API with strict JSON schema outputs.
-Implements typed exceptions for transient/permanent failures,
-zero-hallucination policy (currency is null if not specified),
-and context-aware multi-chunk line item merging without dropping legitimate identical items.
+Parses JSON floats directly into Decimal, implements typed exceptions,
+merges multi-chunk extractions deterministically, and never logs confidential invoice text.
 """
 
 import json
 import re
 import logging
 from decimal import Decimal
-from typing import List, Optional, Tuple
+from typing import List
 from openai import OpenAI, APIConnectionError, RateLimitError, AuthenticationError, APIStatusError
 from core.config import settings
 from models.schemas import InvoiceExtractionSchema, LineItemSchema
@@ -46,7 +45,6 @@ def line_items_equal(a: LineItemSchema, b: LineItemSchema) -> bool:
     if desc_a != desc_b:
         return False
 
-    # Compare numeric attributes with None safety
     for attr in ["quantity", "unit_price", "total"]:
         val_a = getattr(a, attr, None)
         val_b = getattr(b, attr, None)
@@ -79,12 +77,12 @@ class AIExtractorService:
             '  "invoice_date": "YYYY-MM-DD" or null,\n'
             '  "supplier_name": string or null,\n'
             '  "customer_name": string or null,\n'
-            '  "subtotal": float or null,\n'
-            '  "tax": float or null,\n'
-            '  "total_amount": float or null,\n'
+            '  "subtotal": number or null,\n'
+            '  "tax": number or null,\n'
+            '  "total_amount": number or null,\n'
             '  "currency": string or null,\n'
             '  "line_items": [\n'
-            '    {"description": string, "quantity": float, "unit_price": float, "total": float}\n'
+            '    {"description": string, "quantity": number, "unit_price": number, "total": number}\n'
             "  ]\n"
             "}\n"
             "RULES:\n"
@@ -112,7 +110,6 @@ class AIExtractorService:
                 )
                 raw_response = response.choices[0].message.content or "{}"
             except Exception:
-                # Fallback without json_object if model variant rejects parameter
                 response = self.client.chat.completions.create(
                     model=self.model,
                     messages=[
@@ -125,17 +122,16 @@ class AIExtractorService:
                 raw_response = response.choices[0].message.content or "{}"
 
         except AuthenticationError as auth_err:
-            raise AIAuthenticationError(f"Groq API authentication failed: {str(auth_err)}") from auth_err
+            raise AIAuthenticationError("Groq API authentication failed.") from auth_err
         except (RateLimitError, APIConnectionError) as trans_err:
-            raise AITransientError(f"Transient Groq API error: {str(trans_err)}") from trans_err
+            raise AITransientError(f"Transient Groq API error: {type(trans_err).__name__}") from trans_err
         except APIStatusError as status_err:
             if status_err.status_code in [429, 502, 503, 504]:
                 raise AITransientError(f"Groq server status {status_err.status_code}") from status_err
-            raise AIExtractionError(f"Groq API status error: {str(status_err)}") from status_err
+            raise AIExtractionError(f"Groq API status error: {status_err.status_code}") from status_err
         except Exception as e:
-            raise AIExtractionError(f"Unexpected AI client error: {str(e)}") from e
+            raise AIExtractionError(f"Unexpected AI client error: {type(e).__name__}") from e
 
-        # Clean and parse JSON response
         try:
             cleaned = re.sub(r"^```[a-zA-Z]*\s*", "", raw_response.strip())
             cleaned = re.sub(r"\s*```$", "", cleaned).strip()
@@ -143,11 +139,12 @@ class AIExtractorService:
             if json_match:
                 cleaned = json_match.group(0)
 
-            parsed_json = json.loads(cleaned)
+            parsed_json = json.loads(cleaned, parse_float=Decimal)
             return InvoiceExtractionSchema(**parsed_json)
         except Exception as parse_err:
-            logger.error(f"Failed to parse LLM JSON: {parse_err} | Raw: {raw_response[:200]}")
-            raise AIMalformedResponseError(f"Malformed LLM JSON output: {str(parse_err)}") from parse_err
+            # Redact raw LLM payload from logs to prevent sensitive financial data leakage
+            logger.error(f"Failed to parse LLM JSON (payload_length={len(raw_response)}): {type(parse_err).__name__}")
+            raise AIMalformedResponseError(f"Malformed LLM JSON output: {type(parse_err).__name__}") from parse_err
 
     @classmethod
     def merge_extractions(cls, extractions: List[InvoiceExtractionSchema]) -> InvoiceExtractionSchema:
@@ -161,7 +158,6 @@ class AIExtractorService:
         merged = InvoiceExtractionSchema()
 
         for chunk_idx, ext in enumerate(extractions):
-            # Metadata: Keep first non-null
             if not merged.invoice_number and ext.invoice_number:
                 merged.invoice_number = ext.invoice_number
             if not merged.invoice_date and ext.invoice_date:
@@ -173,7 +169,6 @@ class AIExtractorService:
             if not merged.currency and ext.currency:
                 merged.currency = ext.currency
 
-            # Financial Totals: Prefer non-null
             if merged.subtotal is None and ext.subtotal is not None:
                 merged.subtotal = ext.subtotal
             if merged.tax is None and ext.tax is not None:
@@ -181,15 +176,11 @@ class AIExtractorService:
             if merged.total_amount is None and ext.total_amount is not None:
                 merged.total_amount = ext.total_amount
 
-            # Chunk Line Item Merging:
-            # All items inside chunk 0 are added directly.
-            # In subsequent chunks, remove leading items that match the trailing items of previous chunk (overlap).
             if chunk_idx == 0:
                 merged.line_items.extend(ext.line_items)
             else:
                 incoming_items = list(ext.line_items)
                 if merged.line_items and incoming_items:
-                    # Look for overlap: compare tail of merged with head of incoming
                     max_overlap_check = min(5, len(merged.line_items), len(incoming_items))
                     overlap_found = 0
 
@@ -200,7 +191,6 @@ class AIExtractorService:
                             overlap_found = k
                             break
 
-                    # Append only non-overlapping items
                     merged.line_items.extend(incoming_items[overlap_found:])
                 else:
                     merged.line_items.extend(incoming_items)
@@ -208,10 +198,7 @@ class AIExtractorService:
         return merged
 
     def extract_invoice_data(self, document_text: str) -> InvoiceExtractionSchema:
-        """
-        Splits large document text into manageable chunks if needed,
-        extracts data per chunk, and deterministically merges the results.
-        """
+        """Splits large document text into chunks, extracts data per chunk, and merges results."""
         if not document_text or not document_text.strip():
             return InvoiceExtractionSchema()
 
@@ -231,7 +218,7 @@ class AIExtractorService:
 
         extractions = []
         for idx, chunk in enumerate(chunks):
-            logger.info(f"Extracting AI data from chunk {idx + 1}/{len(chunks)}...")
+            logger.info(f"Extracting AI data from chunk {idx + 1}/{len(chunks)}")
             res = self.extract_from_chunk(chunk)
             extractions.append(res)
 

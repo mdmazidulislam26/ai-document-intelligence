@@ -2,30 +2,31 @@
 
 import React, { useState } from 'react';
 import Link from 'next/link';
-import axios from 'axios';
 import { Search as SearchIcon, ArrowUpRight, Sparkles } from 'lucide-react';
 import { StatusBadge } from '@/components/StatusBadge';
-import { getApiBaseUrl } from '@/lib/api';
+import { apiClient } from '@/lib/api';
+import { formatMoney } from '@/lib/money';
 
 export default function SearchPage() {
   const [query, setQuery] = useState('');
   const [searchType, setSearchType] = useState('hybrid');
   const [results, setResults] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
-  const apiUrl = getApiBaseUrl();
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   const handleSearch = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!query.trim()) return;
 
     setLoading(true);
+    setErrorMsg(null);
     try {
-      const res = await axios.get(`${apiUrl}/api/search`, {
+      const res = await apiClient.get('/api/search', {
         params: { q: query, type: searchType, limit: 15 },
       });
       setResults(res.data);
-    } catch (err) {
-      console.error('Search failed:', err);
+    } catch (err: any) {
+      setErrorMsg(err.response?.data?.detail || 'Search failed. Verify API key and connection.');
     } finally {
       setLoading(false);
     }
@@ -48,7 +49,7 @@ export default function SearchPage() {
               type="text"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search by vendor, item, invoice number, or concept (e.g. 'Software license payment')..."
+              placeholder="Search by vendor, item, invoice number, or concept..."
               className="w-full pl-9 pr-4 py-2.5 text-sm border rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none"
             />
           </div>
@@ -79,7 +80,12 @@ export default function SearchPage() {
         </div>
       </form>
 
-      {/* Results List */}
+      {errorMsg && (
+        <div className="p-4 bg-rose-50 border border-rose-200 text-rose-800 rounded-xl text-sm">
+          {errorMsg}
+        </div>
+      )}
+
       <div className="space-y-3">
         {results.map((item) => (
           <div
@@ -99,7 +105,12 @@ export default function SearchPage() {
               <div className="text-xs text-slate-500 mt-1 flex items-center gap-4">
                 <span>File: {item.filename}</span>
                 <span>Invoice: {item.invoice_number || 'N/A'}</span>
-                <span>Total: {item.total_amount ? `$${Number(item.total_amount).toFixed(2)}` : 'N/A'}</span>
+                <span>
+                  Total:{' '}
+                  {item.total_amount != null
+                    ? `${formatMoney(item.total_amount)} ${item.currency || 'USD'}`
+                    : 'N/A'}
+                </span>
               </div>
             </div>
 
@@ -111,7 +122,7 @@ export default function SearchPage() {
             </Link>
           </div>
         ))}
-        {results.length === 0 && !loading && query && (
+        {results.length === 0 && !loading && query && !errorMsg && (
           <div className="p-8 text-center text-slate-400 bg-white rounded-xl border">No matching records found.</div>
         )}
       </div>

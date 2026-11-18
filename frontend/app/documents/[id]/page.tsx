@@ -2,40 +2,33 @@
 
 import React, { useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
-import axios from 'axios';
 import { StatusBadge } from '@/components/StatusBadge';
 import { ValidationAlerts } from '@/components/ValidationAlerts';
 import { ArrowLeft, Save, RotateCcw, CheckCircle } from 'lucide-react';
-import { getApiBaseUrl } from '@/lib/api';
+import { apiClient } from '@/lib/api';
+import { formatMoney, multiplyMoney } from '@/lib/money';
 
 export default function DocumentDetailPage() {
   const params = useParams();
   const router = useRouter();
   const documentId = params.id;
-  const apiUrl = getApiBaseUrl();
 
   const [document, setDocument] = useState<any>(null);
   const [formData, setFormData] = useState<any>({});
   const [isSaving, setIsSaving] = useState(false);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
-  const formatDecimals = (val: any) => {
-    if (val === null || val === undefined || val === '') return '';
-    const num = parseFloat(val);
-    return isNaN(num) ? '' : num.toFixed(2);
-  };
-
   const fetchDocument = async () => {
     try {
-      const res = await axios.get(`${apiUrl}/api/documents/${documentId}`);
+      const res = await apiClient.get(`/api/documents/${documentId}`);
       setDocument(res.data);
       if (res.data.extracted_invoice) {
         const inv = res.data.extracted_invoice;
         const formattedItems = (inv.line_items || []).map((item: any) => ({
           ...item,
-          quantity: item.quantity ?? 1,
-          unit_price: formatDecimals(item.unit_price),
-          total: formatDecimals(item.total),
+          quantity: item.quantity != null ? String(item.quantity) : '1',
+          unit_price: formatMoney(item.unit_price),
+          total: formatMoney(item.total),
         }));
 
         setFormData({
@@ -43,9 +36,9 @@ export default function DocumentDetailPage() {
           invoice_date: inv.invoice_date || '',
           supplier_name: inv.supplier_name || '',
           customer_name: inv.customer_name || '',
-          subtotal: formatDecimals(inv.subtotal),
-          tax: formatDecimals(inv.tax),
-          total_amount: formatDecimals(inv.total_amount),
+          subtotal: formatMoney(inv.subtotal),
+          tax: formatMoney(inv.tax),
+          total_amount: formatMoney(inv.total_amount),
           currency: inv.currency || 'USD',
           line_items: formattedItems,
         });
@@ -66,7 +59,7 @@ export default function DocumentDetailPage() {
   const handleBlurFormat = (field: string) => {
     setFormData((prev: any) => ({
       ...prev,
-      [field]: formatDecimals(prev[field]),
+      [field]: formatMoney(prev[field]),
     }));
   };
 
@@ -74,9 +67,9 @@ export default function DocumentDetailPage() {
     const updated = [...formData.line_items];
     updated[index][field] = value;
     if (field === 'quantity' || field === 'unit_price') {
-      const q = parseFloat(field === 'quantity' ? value : updated[index].quantity) || 0;
-      const p = parseFloat(field === 'unit_price' ? value : updated[index].unit_price) || 0;
-      updated[index]['total'] = (q * p).toFixed(2);
+      const q = field === 'quantity' ? value : updated[index].quantity;
+      const p = field === 'unit_price' ? value : updated[index].unit_price;
+      updated[index]['total'] = multiplyMoney(q, p);
     }
     setFormData((prev: any) => ({ ...prev, line_items: updated }));
   };
@@ -87,9 +80,9 @@ export default function DocumentDetailPage() {
     try {
       const cleanedItems = (formData.line_items || []).map((it: any) => ({
         description: it.description,
-        quantity: parseFloat(it.quantity) || 0,
-        unit_price: parseFloat(it.unit_price) || 0,
-        total: parseFloat(it.total) || 0,
+        quantity: it.quantity !== '' && it.quantity != null ? String(it.quantity) : '0',
+        unit_price: it.unit_price !== '' && it.unit_price != null ? formatMoney(it.unit_price) : '0.00',
+        total: it.total !== '' && it.total != null ? formatMoney(it.total) : '0.00',
       }));
 
       const payload = {
@@ -97,14 +90,14 @@ export default function DocumentDetailPage() {
         invoice_date: formData.invoice_date || null,
         supplier_name: formData.supplier_name || null,
         customer_name: formData.customer_name || null,
-        subtotal: formData.subtotal !== '' ? parseFloat(formData.subtotal) : null,
-        tax: formData.tax !== '' ? parseFloat(formData.tax) : null,
-        total_amount: formData.total_amount !== '' ? parseFloat(formData.total_amount) : null,
+        subtotal: formData.subtotal !== '' ? formatMoney(formData.subtotal) : null,
+        tax: formData.tax !== '' ? formatMoney(formData.tax) : null,
+        total_amount: formData.total_amount !== '' ? formatMoney(formData.total_amount) : null,
         currency: formData.currency,
         line_items: cleanedItems,
       };
 
-      const res = await axios.put(`${apiUrl}/api/documents/${documentId}/correct`, payload);
+      const res = await apiClient.put(`/api/documents/${documentId}/correct`, payload);
       setDocument(res.data);
       setSuccessMessage('Corrections saved and re-validated successfully!');
       fetchDocument();
@@ -117,11 +110,11 @@ export default function DocumentDetailPage() {
 
   const handleReprocess = async () => {
     try {
-      await axios.post(`${apiUrl}/api/documents/${documentId}/reprocess`);
+      await apiClient.post(`/api/documents/${documentId}/reprocess`);
       alert('Document requeued for reprocessing.');
       setTimeout(fetchDocument, 2000);
     } catch (err: any) {
-      alert('Reprocess error: ' + err.message);
+      alert('Reprocess error: ' + (err.response?.data?.detail || err.message));
     }
   };
 
@@ -156,11 +149,10 @@ export default function DocumentDetailPage() {
         </div>
       )}
 
-      {/* Editor Grid */}
       <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6 md:p-8 space-y-6">
         <div className="border-b border-slate-100 pb-4">
           <h2 className="text-lg font-bold text-slate-900">Extracted Invoice Details</h2>
-          <p className="text-xs text-slate-500">Formatted in standard financial 2-decimal precision (e.g. 150.00).</p>
+          <p className="text-xs text-slate-500">Formatted in exact financial 2-decimal precision (e.g. 150.00).</p>
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -205,7 +197,7 @@ export default function DocumentDetailPage() {
           </div>
 
           <div>
-            <label className="block text-xs font-semibold text-slate-700 mb-1">Subtotal Amount (USD)</label>
+            <label className="block text-xs font-semibold text-slate-700 mb-1">Subtotal Amount</label>
             <input
               type="number"
               step="0.01"
@@ -217,7 +209,7 @@ export default function DocumentDetailPage() {
           </div>
 
           <div>
-            <label className="block text-xs font-semibold text-slate-700 mb-1">Tax Amount (USD)</label>
+            <label className="block text-xs font-semibold text-slate-700 mb-1">Tax Amount</label>
             <input
               type="number"
               step="0.01"
@@ -229,7 +221,7 @@ export default function DocumentDetailPage() {
           </div>
 
           <div>
-            <label className="block text-xs font-semibold text-slate-700 mb-1">Total Amount (USD)</label>
+            <label className="block text-xs font-semibold text-slate-700 mb-1">Total Amount</label>
             <input
               type="number"
               step="0.01"
@@ -251,7 +243,6 @@ export default function DocumentDetailPage() {
           </div>
         </div>
 
-        {/* Line Items Table */}
         <div className="pt-4">
           <h3 className="text-sm font-bold text-slate-800 mb-3">Line Items</h3>
           <div className="border rounded-lg overflow-hidden">
@@ -293,7 +284,7 @@ export default function DocumentDetailPage() {
                       />
                     </td>
                     <td className="p-2 font-mono font-semibold text-slate-800">
-                      {formatDecimals(item.total)}
+                      {formatMoney(item.total)}
                     </td>
                   </tr>
                 ))}

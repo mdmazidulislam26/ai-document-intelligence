@@ -1,6 +1,6 @@
 """
 Celery asynchronous task broker configuration.
-Uses Redis as message broker and result backend.
+Uses Redis as message broker and result backend, with periodic outbox reconciliation.
 """
 
 from celery import Celery
@@ -22,4 +22,11 @@ celery_app.conf.update(
     task_track_started=True,
     task_acks_late=True,
     worker_prefetch_multiplier=1,
+    broker_connection_retry_on_startup=True,
+    beat_schedule={
+        "reconcile-pending-outbox-every-30s": {
+            "task": "tasks.processing_tasks.reconcile_outbox_task",
+            "schedule": 30.0,
+        },
+    },
 )

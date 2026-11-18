@@ -2,11 +2,11 @@
 
 import React, { useEffect, useState } from 'react';
 import Link from 'next/link';
-import axios from 'axios';
 import { FileUploader } from '@/components/FileUploader';
 import { StatusBadge } from '@/components/StatusBadge';
 import { ArrowUpRight, RefreshCw } from 'lucide-react';
-import { getApiBaseUrl } from '@/lib/api';
+import { apiClient } from '@/lib/api';
+import { formatMoney } from '@/lib/money';
 
 interface DocumentRecord {
   id: number;
@@ -17,7 +17,7 @@ interface DocumentRecord {
   extracted_invoice?: {
     supplier_name: string | null;
     invoice_number: string | null;
-    total_amount: number | null;
+    total_amount: string | number | null;
     currency: string | null;
   };
 }
@@ -25,14 +25,19 @@ interface DocumentRecord {
 export default function DashboardPage() {
   const [documents, setDocuments] = useState<DocumentRecord[]>([]);
   const [loading, setLoading] = useState(true);
-  const apiUrl = getApiBaseUrl();
+  const [authError, setAuthError] = useState<string | null>(null);
 
   const fetchDocuments = async () => {
     try {
-      const res = await axios.get(`${apiUrl}/api/documents?limit=50`);
+      const res = await apiClient.get('/api/documents?limit=50');
       setDocuments(res.data);
-    } catch (err) {
-      console.error('Failed to fetch documents:', err);
+      setAuthError(null);
+    } catch (err: any) {
+      if (err.response?.status === 401) {
+        setAuthError('Authentication required. Enter your API Key in the top navigation bar.');
+      } else {
+        console.error('Failed to fetch documents:', err);
+      }
     } finally {
       setLoading(false);
     }
@@ -50,6 +55,12 @@ export default function DashboardPage() {
         <h1 className="text-2xl font-bold tracking-tight text-slate-900">Document Intelligence Workspace</h1>
         <p className="text-sm text-slate-500 mt-1">Upload and monitor incoming invoices, receipts, and spreadsheets.</p>
       </div>
+
+      {authError && (
+        <div className="p-4 bg-amber-50 border border-amber-200 text-amber-900 rounded-xl text-sm">
+          {authError}
+        </div>
+      )}
 
       <FileUploader onUploadSuccess={fetchDocuments} />
 
@@ -95,9 +106,9 @@ export default function DashboardPage() {
                     <td className="px-6 py-4">
                       {doc.extracted_invoice?.invoice_number || <span className="text-slate-400 italic">N/A</span>}
                     </td>
-                    <td className="px-6 py-4 font-semibold text-slate-900">
+                    <td className="px-6 py-4 font-semibold text-slate-900 font-mono">
                       {doc.extracted_invoice?.total_amount != null
-                        ? `${Number(doc.extracted_invoice.total_amount).toFixed(2)} ${doc.extracted_invoice.currency || 'USD'}`
+                        ? `${formatMoney(doc.extracted_invoice.total_amount)} ${doc.extracted_invoice.currency || 'USD'}`
                         : <span className="text-slate-400 italic">N/A</span>}
                     </td>
                     <td className="px-6 py-4">

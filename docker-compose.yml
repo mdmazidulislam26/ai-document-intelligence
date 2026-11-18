@@ -54,7 +54,7 @@ services:
     volumes:
       - ./backend:/app
       - uploads_volume:/tmp/doc_intelligence/uploads
-    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+    command: sh -c "alembic upgrade head && uvicorn main:app --host 0.0.0.0 --port 8000 --reload"
 
   celery_worker:
     build:
@@ -76,7 +76,7 @@ services:
     volumes:
       - ./backend:/app
       - uploads_volume:/tmp/doc_intelligence/uploads
-    command: celery -A core.celery_app.celery_app worker --loglevel=info --concurrency=2
+    command: celery -A core.celery_app.celery_app worker -B -s /tmp/celerybeat-schedule --loglevel=info --concurrency=2
 
 volumes:
   postgres_data:

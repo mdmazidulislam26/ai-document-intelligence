@@ -2,14 +2,12 @@
 
 import React, { useState } from 'react';
 import { useDropzone } from 'react-dropzone';
-import axios from 'axios';
 import { UploadCloud, Loader2, CheckCircle2 } from 'lucide-react';
-import { getApiBaseUrl } from '@/lib/api';
+import { apiClient } from '@/lib/api';
 
 export const FileUploader: React.FC<{ onUploadSuccess: () => void }> = ({ onUploadSuccess }) => {
   const [isUploading, setIsUploading] = useState(false);
   const [uploadMessage, setUploadMessage] = useState<string | null>(null);
-  const apiUrl = getApiBaseUrl();
 
   const onDrop = async (acceptedFiles: File[]) => {
     if (acceptedFiles.length === 0) return;
@@ -22,13 +20,13 @@ export const FileUploader: React.FC<{ onUploadSuccess: () => void }> = ({ onUplo
     });
 
     try {
-      await axios.post(`${apiUrl}/api/documents/upload`, formData, {
+      await apiClient.post('/api/documents/upload', formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
       });
       setUploadMessage(`Successfully queued ${acceptedFiles.length} file(s) for processing.`);
       onUploadSuccess();
     } catch (err: any) {
-      setUploadMessage(err.response?.data?.detail || 'Upload failed. Please check backend connection.');
+      setUploadMessage(err.response?.data?.detail || 'Upload failed. Please verify API key and backend connection.');
     } finally {
       setIsUploading(false);
     }

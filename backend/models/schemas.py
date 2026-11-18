@@ -1,12 +1,33 @@
 """
 Pydantic v2 validation schemas for API requests, responses, AI structured output,
-and rich hybrid search results with Reciprocal Rank Fusion metadata.
+rich hybrid search results, and cross-document verification.
+Preserves exact Decimal precision without binary float intermediate artifacts.
 """
 
+import re
 from datetime import datetime, date
 from decimal import Decimal
-from typing import List, Optional
-from pydantic import BaseModel, Field, ConfigDict
+from typing import List, Optional, Dict, Any
+from pydantic import BaseModel, Field, ConfigDict, field_validator
+
+
+def _coerce_decimal(val: Any) -> Optional[Decimal]:
+    if val is None or val == "":
+        return None
+    if isinstance(val, Decimal):
+        return val
+    if isinstance(val, bool):
+        return None
+    if isinstance(val, int):
+        return Decimal(val)
+    if isinstance(val, float):
+        return Decimal(str(val))
+    if isinstance(val, str):
+        cleaned = re.sub(r"[^\d.-]", "", val.strip())
+        if not cleaned or cleaned == "-":
+            return None
+        return Decimal(cleaned)
+    return Decimal(str(val))
 
 
 # ---------------------------------------------------------
@@ -21,6 +42,11 @@ class LineItemSchema(BaseModel):
     total: Optional[Decimal] = Field(default=None, description="Total amount for this specific line item")
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    @field_validator("quantity", "unit_price", "total", mode="before")
+    @classmethod
+    def parse_decimal_fields(cls, v: Any) -> Optional[Decimal]:
+        return _coerce_decimal(v)
 
 
 class InvoiceExtractionSchema(BaseModel):
@@ -39,6 +65,11 @@ class InvoiceExtractionSchema(BaseModel):
     line_items: List[LineItemSchema] = Field(default_factory=list, description="List of itemized products or services")
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    @field_validator("subtotal", "tax", "total_amount", mode="before")
+    @classmethod
+    def parse_monetary_fields(cls, v: Any) -> Optional[Decimal]:
+        return _coerce_decimal(v)
 
 
 # ---------------------------------------------------------
@@ -107,6 +138,31 @@ class ManualCorrectionRequest(BaseModel):
     total_amount: Optional[Decimal] = None
     currency: Optional[str] = None
     line_items: Optional[List[dict]] = None
+
+    @field_validator("subtotal", "tax", "total_amount", mode="before")
+    @classmethod
+    def parse_monetary_fields(cls, v: Any) -> Optional[Decimal]:
+        return _coerce_decimal(v)
+
+
+class CrossVerifyRequest(BaseModel):
+    """Request payload to cross-verify a processed document against a reference document."""
+    reference_document_id: int = Field(..., ge=1, description="ID of the reference PDF, image, Excel, or CSV document")
+
+
+class CrossVerificationResponse(BaseModel):
+    """Structured response for cross-document verification."""
+    id: int
+    document_id: int
+    reference_document_id: int
+    verification_mode: str
+    overall_status: str
+    discrepancy_count: int
+    comparison_details: Dict[str, Any]
+    validation_logs: List[ValidationLogSchema] = Field(default_factory=list)
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
 
 
 class SearchRequest(BaseModel):
