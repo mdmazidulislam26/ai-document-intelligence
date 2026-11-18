@@ -1,7 +1,8 @@
 """
-Large Multi-Page PDF Capacity & Peak RSS Memory Benchmark.
-Generates real binary PDFs with 100, 500, and 1,000 pages, tests page-by-page streaming extraction,
-measures wall-clock time, pages/sec throughput, and tracks peak RSS memory (MB) to prove bounded memory.
+Large Multi-Page PDF Parser-Iterator Benchmark.
+Generates synthetic PDFs with 100, 500, and 1,000 pages and measures only
+DocumentParserService.stream_pdf_pages() wall-clock throughput and process RSS.
+This does not run OCR, full-text aggregation, AI extraction, or the end-to-end pipeline.
 Outputs results to evaluation/large_pdf_benchmark_report.md.
 """
 
@@ -149,8 +150,9 @@ def _write_large_pdf_report(results: list[dict], report_path: str) -> None:
         "# Large PDF Capacity & Peak RSS Memory Benchmark Report",
         "",
         "## 1. Methodology & Environmental Constraints",
-        "- **Test Mechanism:** Evaluates `DocumentParserService.stream_pdf_pages()` on authentic multi-page PDFs up to 1,000 pages.",
-        "- **Memory Bounding:** Memory is measured via Linux resident set size (`/proc/self/status` `VmRSS` and `VmHWM`). Each page's text and pixmap are released immediately after processing (`del pix`), preventing linear RAM accumulation.",
+        "- **Test Mechanism:** Evaluates only `DocumentParserService.stream_pdf_pages()` on generated multi-page PDFs up to 1,000 pages.",
+        "- **Scope Limitation:** This parser-iterator microbenchmark does not invoke OCR, `extract_full_text()` aggregation, AI extraction, database persistence, or the complete document pipeline.",
+        "- **Memory Measurement:** Samples Linux process RSS (`/proc/self/status` `VmRSS` and `VmHWM`) during this iterator run; these measurements must not be interpreted as end-to-end pipeline memory usage.",
         "- **Hardware Context:** Executed inside the project container runtime on Linux x86_64.",
         "",
         "## 2. Measured Scalability & Memory Results",
@@ -171,7 +173,7 @@ def _write_large_pdf_report(results: list[dict], report_path: str) -> None:
         "",
         "## 3. Findings & Performance Analysis",
         f"- **1,000-Page Execution:** Successfully parsed 1,000 pages in **{results[-1]['elapsed_sec']:.2f} seconds** ({results[-1]['pages_per_sec']:.1f} pages/second).",
-        f"- **Memory Bounding Confirmed:** Net RSS growth remained bounded under **{results[-1]['rss_growth_mb']:.1f} MB** across 1,000 pages, demonstrating that page-by-page streaming prevents out-of-memory crashes.",
+        f"- **Parser Iterator RSS Observation:** Net process RSS growth during this iterator-only run was **{results[-1]['rss_growth_mb']:.1f} MB**. This does not establish bounded memory for OCR, full-text aggregation, or the complete AI pipeline.",
         "- Re-run benchmark anytime via `docker compose exec backend python /app/evaluation/benchmark_large_pdf.py`.",
     ])
 
