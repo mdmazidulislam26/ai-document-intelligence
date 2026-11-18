@@ -5,6 +5,10 @@ Enforces strict production security and migration safety policies.
 
 import os
 import json
+import math
+import re
+from collections import Counter
+from urllib.parse import unquote, urlsplit
 from typing import Dict, List, Optional, Union
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -26,10 +30,33 @@ KNOWN_INSECURE_API_KEYS = {
     "dev-local-api-key-change-me",
 }
 
-KNOWN_WEAK_DB_MARKERS = (
-    "postgres:postgres@",
-    "change_me_strong_postgres_password",
+_WEAK_SECRET_MARKERS = (
+    "password", "changeme", "qwerty", "123456", "letmein", "admin123",
 )
+
+
+def _has_sufficient_secret_strength(value: str, min_length: int) -> bool:
+    """Reject short, repetitive, low-diversity, and common-pattern secrets."""
+    candidate = (value or "").strip()
+    lowered = candidate.lower()
+    if len(candidate) < min_length or len(set(candidate)) < 8:
+        return False
+    if any(marker in lowered for marker in _WEAK_SECRET_MARKERS):
+        return False
+    if re.search(r"(.)\1{5,}", candidate):
+        return False
+
+    counts = Counter(candidate)
+    entropy = -sum((count / len(candidate)) * math.log2(count / len(candidate)) for count in counts.values())
+    return entropy >= 3.25
+
+
+def _database_url_has_strong_password(database_url: str) -> bool:
+    try:
+        password = unquote(urlsplit(database_url).password or "")
+    except (TypeError, ValueError):
+        return False
+    return _has_sufficient_secret_strength(password, min_length=16)
 
 
 class Settings(BaseSettings):
@@ -107,16 +134,16 @@ class Settings(BaseSettings):
             return
 
         secret = (self.AUTH_SECRET_KEY or "").strip()
-        if not secret or secret in KNOWN_INSECURE_SECRETS or len(secret) < 32:
+        if secret in KNOWN_INSECURE_SECRETS or not _has_sufficient_secret_strength(secret, min_length=32):
             raise RuntimeError(
-                "Insecure AUTH_SECRET_KEY in production: must be >= 32 chars and not a placeholder."
+                "Insecure AUTH_SECRET_KEY in production: use a high-entropy random secret of at least 32 chars."
             )
 
         internal_tok = (self.INTERNAL_SERVICE_TOKEN or "").strip()
         if internal_tok:
-            if internal_tok in KNOWN_INSECURE_INTERNAL_TOKENS or len(internal_tok) < 24:
+            if internal_tok in KNOWN_INSECURE_INTERNAL_TOKENS or not _has_sufficient_secret_strength(internal_tok, min_length=24):
                 raise RuntimeError(
-                    "Insecure INTERNAL_SERVICE_TOKEN in production: must be >= 24 chars and not a placeholder."
+                    "Insecure INTERNAL_SERVICE_TOKEN in production: use a high-entropy random token of at least 24 chars."
                 )
 
         api_keys = self.get_api_keys()
@@ -124,14 +151,16 @@ class Settings(BaseSettings):
             raise RuntimeError("API_KEYS_JSON must configure at least one valid API key in production.")
 
         for k, meta in api_keys.items():
-            if k in KNOWN_INSECURE_API_KEYS or len(k) < 16:
-                raise RuntimeError("Insecure or development API key detected in production API_KEYS_JSON.")
+            if k in KNOWN_INSECURE_API_KEYS or not _has_sufficient_secret_strength(k, min_length=24):
+                raise RuntimeError("Insecure or low-entropy API key detected in production API_KEYS_JSON.")
             if not isinstance(meta, dict) or not str(meta.get("owner_id") or "").strip():
                 raise RuntimeError("Every API key entry in API_KEYS_JSON must specify a non-empty owner_id.")
 
         for db_url in (self.DATABASE_URL, self.SYNC_DATABASE_URL):
-            if any(marker in db_url for marker in KNOWN_WEAK_DB_MARKERS):
-                raise RuntimeError("Weak or placeholder database credentials detected in production.")
+            if not _database_url_has_strong_password(db_url):
+                raise RuntimeError(
+                    "Weak or missing database password: use a high-entropy random password of at least 16 chars in production."
+                )
 
     def get_allowed_origins(self) -> List[str]:
         origins = list(self.ALLOWED_ORIGINS)
