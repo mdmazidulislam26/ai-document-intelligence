@@ -16,16 +16,17 @@ application and as an engineering aid during development:
       - Role: Extracts structured financial invoice entities (invoice_number,
         invoice_date, supplier_name, customer_name, subtotal, tax, total_amount,
         currency, and itemized line_items) from parsed text.
-      - Zero-Hallucination Policy: Strict JSON Schema enforcement with explicit
-        null coercions when information is missing or unreadable.
+      - Extraction policy: The prompt requests null for information that is
+        missing or unreadable. Structured output and deterministic validation
+        reduce risk, but do not constitute a universal zero-hallucination guarantee.
 2.  Development Methodology:
       - AI tools were utilized for architectural auditing, drafting
         unit/integration test scenarios, generating synthetic benchmark document
         fixtures, and optimizing SQL queries (e.g. PostgreSQL ts_rank_cd and
         pgvector HNSW CTE indexing).
-      - All code, database schemas, and mathematical validation algorithms were
-        reviewed, verified, and empirically tested in a Linux Docker environment
-        with 83 automated unit/integration tests and live benchmarks.
+      - Code, database schemas, and mathematical validation algorithms were
+        reviewed and tested during development. See the repository's current
+        CI run and evaluation reports for the actual test and benchmark results.
 
 2. Runtime System Prompt Architecture
 
@@ -49,7 +50,7 @@ You are an expert financial data extraction engine. Analyze the document and ret
   ]
 }
 RULES:
-1. ZERO HALLUCINATION: If any field is not explicitly present or discernable, return null.
+1. Do not infer missing facts: If any field is not explicitly present or discernable, return null. This is a prompt instruction, not a guarantee that model output is always correct.
 2. Never assume USD or any currency unless explicitly stated or indicated by symbol ($ -> USD, € -> EUR, £ -> GBP).
 3. Format invoice_date strictly as YYYY-MM-DD if available.
 4. For spreadsheets, each row should map to a line item.
