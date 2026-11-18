@@ -171,12 +171,12 @@ async def test_ghr05_migration_safety_checks_and_fail_fast():
             with pytest.raises(MigrationSafetyError, match="unknown/missing Alembic revision"):
                 verify_migration_status_sync(connection=conn, alembic_cfg=cfg)
 
-        secure_prod_key = "a" * 32
-        secure_keys_json = json.dumps({"prod-key-1234567890123456": {"owner_id": "admin", "role": "admin"}})
+        secure_prod_key = "R4nd0m!Production-Auth-Key_2026#G7x9vP2s"
+        secure_keys_json = json.dumps({"r4nd0mApiKey_2026#G7x9vP2s!": {"owner_id": "admin", "role": "admin"}})
         with patch.object(settings, "ENVIRONMENT", "production"), \
              patch.object(settings, "AUTH_SECRET_KEY", secure_prod_key), \
              patch.object(settings, "API_KEYS_JSON", secure_keys_json), \
-             patch.object(settings, "INTERNAL_SERVICE_TOKEN", "b" * 32), \
+             patch.object(settings, "INTERNAL_SERVICE_TOKEN", "T0k3n!Internal-Secret_2026#xP9v"), \
              patch.object(settings, "DATABASE_URL", "postgresql+asyncpg://app_user:StrongProdPass99!@db:5432/doc_intelligence"), \
              patch.object(settings, "SYNC_DATABASE_URL", "postgresql+psycopg2://app_user:StrongProdPass99!@db:5432/doc_intelligence"), \
              patch.object(settings, "AUTO_RUN_MIGRATIONS", None), \
