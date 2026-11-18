@@ -108,7 +108,7 @@ export default function DashboardPage() {
                     </td>
                     <td className="px-6 py-4 font-semibold text-slate-900 font-mono">
                       {doc.extracted_invoice?.total_amount != null
-                        ? `${formatMoney(doc.extracted_invoice.total_amount)} ${doc.extracted_invoice.currency || 'USD'}`
+                        ? `${formatMoney(doc.extracted_invoice.total_amount)}${doc.extracted_invoice.currency ? ` ${doc.extracted_invoice.currency}` : ''}`
                         : <span className="text-slate-400 italic">N/A</span>}
                     </td>
                     <td className="px-6 py-4">

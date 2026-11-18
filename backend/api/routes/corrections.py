@@ -1,7 +1,6 @@
 """
 Manual correction endpoints enabling human-in-the-loop adjustments,
-with owner authorization, rate limiting, lossless Decimal JSONB normalization,
-dynamic re-validation, and vector embedding updates.
+preserving null/unknown currency unless explicitly set by user (GHR-04).
 """
 
 from decimal import Decimal
@@ -49,6 +48,8 @@ async def correct_invoice_data(
     if not invoice:
         raise HTTPException(status_code=400, detail="Cannot apply corrections to a document without extracted data.")
 
+    fields_set = payload.model_fields_set
+
     if payload.invoice_number is not None:
         invoice.invoice_number = payload.invoice_number
     if payload.invoice_date is not None:
@@ -63,7 +64,8 @@ async def correct_invoice_data(
         invoice.tax = quantize_money(payload.tax)
     if payload.total_amount is not None:
         invoice.total_amount = quantize_money(payload.total_amount)
-    if payload.currency is not None:
+    if "currency" in fields_set:
+        # Preserve explicit None (unknown) or normalized currency string without defaulting to USD
         invoice.currency = payload.currency
     if payload.line_items is not None:
         invoice.line_items = normalize_line_items_for_jsonb(payload.line_items)
@@ -121,7 +123,7 @@ async def correct_invoice_data(
     summary = (
         f"Supplier: {invoice.supplier_name or 'N/A'}. "
         f"Invoice: {invoice.invoice_number or 'N/A'}. "
-        f"Total: {invoice.total_amount or Decimal('0.00')} {invoice.currency or 'USD'}. "
+        f"Total: {invoice.total_amount or Decimal('0.00')} {invoice.currency or 'Unknown'}. "
         f"Customer: {invoice.customer_name or 'N/A'}."
     )
     invoice.embedding = VectorService.generate_embedding(summary)

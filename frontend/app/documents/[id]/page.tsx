@@ -31,6 +31,7 @@ export default function DocumentDetailPage() {
           total: formatMoney(item.total),
         }));
 
+        // Preserve null/unknown currency as empty string (never default to USD)
         setFormData({
           invoice_number: inv.invoice_number || '',
           invoice_date: inv.invoice_date || '',
@@ -39,7 +40,7 @@ export default function DocumentDetailPage() {
           subtotal: formatMoney(inv.subtotal),
           tax: formatMoney(inv.tax),
           total_amount: formatMoney(inv.total_amount),
-          currency: inv.currency || 'USD',
+          currency: inv.currency || '',
           line_items: formattedItems,
         });
       }
@@ -85,6 +86,11 @@ export default function DocumentDetailPage() {
         total: it.total !== '' && it.total != null ? formatMoney(it.total) : '0.00',
       }));
 
+      const normalizedCurrency =
+        formData.currency && String(formData.currency).trim()
+          ? String(formData.currency).trim().toUpperCase()
+          : null;
+
       const payload = {
         invoice_number: formData.invoice_number || null,
         invoice_date: formData.invoice_date || null,
@@ -93,7 +99,7 @@ export default function DocumentDetailPage() {
         subtotal: formData.subtotal !== '' ? formatMoney(formData.subtotal) : null,
         tax: formData.tax !== '' ? formatMoney(formData.tax) : null,
         total_amount: formData.total_amount !== '' ? formatMoney(formData.total_amount) : null,
-        currency: formData.currency,
+        currency: normalizedCurrency,
         line_items: cleanedItems,
       };
 
@@ -236,7 +242,8 @@ export default function DocumentDetailPage() {
             <label className="block text-xs font-semibold text-slate-700 mb-1">Currency</label>
             <input
               type="text"
-              value={formData.currency || 'USD'}
+              value={formData.currency ?? ''}
+              placeholder="Unknown (leave blank if missing)"
               onChange={(e) => handleInputChange('currency', e.target.value)}
               className="w-full text-sm px-3 py-2 border rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none font-mono"
             />

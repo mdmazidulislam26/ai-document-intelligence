@@ -1,13 +1,12 @@
 """
-Transactional outbox dispatch and reconciliation service.
-Ensures queued documents are never lost during Redis outages and stuck documents
-are safely recovered without creating duplicate dispatches.
+Transactional outbox dispatch and lease-aware reconciliation service (GHR-01).
+Only recovers genuinely abandoned 'processing' jobs whose worker lease has expired.
 """
 
 import logging
 from datetime import datetime, timedelta
 from typing import Dict, List
-from sqlalchemy import select, and_
+from sqlalchemy import select, and_, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
@@ -18,15 +17,11 @@ logger = logging.getLogger("outbox_service")
 
 class OutboxService:
     STUCK_QUEUED_THRESHOLD_SECONDS = 60
-    STALE_PROCESSING_THRESHOLD_MINUTES = 15
+    ORPHAN_NO_LEASE_THRESHOLD_MINUTES = 15
     DISPATCH_RETRY_BACKOFF_SECONDS = 15
 
     @classmethod
     async def dispatch_outbox_entries_async(cls, db: AsyncSession, outbox_ids: List[int]) -> Dict[str, int]:
-        """
-        Attempts to dispatch committed TaskOutbox entries via Celery after DB commit.
-        Records dispatch success or schedules backoff if broker is unavailable.
-        """
         from tasks.processing_tasks import process_document_task
 
         dispatched = 0
@@ -50,7 +45,7 @@ class OutboxService:
                 entry.last_error = f"Broker dispatch failed: {str(broker_err)}"
                 entry.next_attempt_at = now + timedelta(seconds=cls.DISPATCH_RETRY_BACKOFF_SECONDS)
                 failed += 1
-                logger.error(f"Outbox #{entry.id} dispatch failed for doc #{entry.document_id}: {broker_err}")
+                logger.error(f"Outbox #{entry.id} dispatch failed for doc #{entry.document_id}: {type(broker_err).__name__}")
 
         await db.commit()
         return {"dispatched": dispatched, "failed": failed}
@@ -58,7 +53,8 @@ class OutboxService:
     @classmethod
     async def reconcile_pending_and_stuck_async(cls, db: AsyncSession) -> Dict[str, int]:
         """
-        Reconciles pending outbox records AND rescues any stuck 'queued' or stale 'processing' documents.
+        Reconciles pending outbox records AND rescues stuck 'queued' or genuinely expired-lease 'processing' jobs.
+        Active workers renewing their lease (processing_lease_until > now) are NEVER re-queued.
         """
         now = datetime.utcnow()
         rescued_stuck = 0
@@ -70,7 +66,7 @@ class OutboxService:
                 Document.status == "queued",
                 Document.updated_at <= queued_cutoff,
             )
-        )
+        ).with_for_update(skip_locked=True)
         stuck_docs = (await db.execute(stuck_docs_stmt)).scalars().all()
 
         for doc in stuck_docs:
@@ -85,32 +81,36 @@ class OutboxService:
                 )
             ).scalar()
             if not existing_pending:
-                db.add(
-                    TaskOutbox(
-                        document_id=doc.id,
-                        status="pending",
-                        next_attempt_at=now,
-                    )
-                )
+                db.add(TaskOutbox(document_id=doc.id, status="pending", next_attempt_at=now))
                 rescued_stuck += 1
 
-        # 2. Rescue documents stuck in 'processing' beyond stale threshold (e.g. worker crash)
-        stale_cutoff = now - timedelta(minutes=cls.STALE_PROCESSING_THRESHOLD_MINUTES)
-        stale_docs_stmt = select(Document).where(
+        # 2. Rescue ONLY abandoned 'processing' jobs whose lease has genuinely expired
+        orphan_cutoff = now - timedelta(minutes=cls.ORPHAN_NO_LEASE_THRESHOLD_MINUTES)
+        expired_lease_stmt = select(Document).where(
             and_(
                 Document.status == "processing",
-                Document.updated_at <= stale_cutoff,
+                or_(
+                    Document.processing_lease_until <= now,
+                    and_(
+                        Document.processing_lease_until.is_(None),
+                        Document.updated_at <= orphan_cutoff,
+                    ),
+                ),
             )
-        )
-        stale_docs = (await db.execute(stale_docs_stmt)).scalars().all()
-        for doc in stale_docs:
+        ).with_for_update(skip_locked=True)
+        expired_docs = (await db.execute(expired_lease_stmt)).scalars().all()
+
+        for doc in expired_docs:
             doc.status = "queued"
+            doc.worker_id = None
+            doc.processing_lease_until = None
+            doc.last_heartbeat_at = None
             doc.updated_at = now
             db.add(
                 TaskOutbox(
                     document_id=doc.id,
                     status="pending",
-                    last_error="Recovered from stale processing state",
+                    last_error="Recovered after worker lease expiration",
                     next_attempt_at=now,
                 )
             )
@@ -118,7 +118,6 @@ class OutboxService:
 
         await db.flush()
 
-        # 3. Fetch all ready pending outbox rows
         pending_stmt = select(TaskOutbox.id).where(
             and_(
                 TaskOutbox.status == "pending",
@@ -134,7 +133,7 @@ class OutboxService:
 
     @classmethod
     def reconcile_pending_and_stuck_sync(cls, session: Session) -> Dict[str, int]:
-        """Synchronous reconciliation used by periodic Celery Beat worker task."""
+        """Synchronous lease-aware reconciliation used by periodic Celery Beat worker task."""
         from tasks.processing_tasks import process_document_task
 
         now = datetime.utcnow()
@@ -146,6 +145,7 @@ class OutboxService:
         stuck_docs = (
             session.query(Document)
             .filter(and_(Document.status == "queued", Document.updated_at <= queued_cutoff))
+            .with_for_update(skip_locked=True)
             .all()
         )
         for doc in stuck_docs:
@@ -158,20 +158,35 @@ class OutboxService:
                 session.add(TaskOutbox(document_id=doc.id, status="pending", next_attempt_at=now))
                 rescued_stuck += 1
 
-        stale_cutoff = now - timedelta(minutes=cls.STALE_PROCESSING_THRESHOLD_MINUTES)
-        stale_docs = (
+        orphan_cutoff = now - timedelta(minutes=cls.ORPHAN_NO_LEASE_THRESHOLD_MINUTES)
+        expired_docs = (
             session.query(Document)
-            .filter(and_(Document.status == "processing", Document.updated_at <= stale_cutoff))
+            .filter(
+                and_(
+                    Document.status == "processing",
+                    or_(
+                        Document.processing_lease_until <= now,
+                        and_(
+                            Document.processing_lease_until.is_(None),
+                            Document.updated_at <= orphan_cutoff,
+                        ),
+                    ),
+                )
+            )
+            .with_for_update(skip_locked=True)
             .all()
         )
-        for doc in stale_docs:
+        for doc in expired_docs:
             doc.status = "queued"
+            doc.worker_id = None
+            doc.processing_lease_until = None
+            doc.last_heartbeat_at = None
             doc.updated_at = now
             session.add(
                 TaskOutbox(
                     document_id=doc.id,
                     status="pending",
-                    last_error="Recovered from stale processing state",
+                    last_error="Recovered after worker lease expiration",
                     next_attempt_at=now,
                 )
             )

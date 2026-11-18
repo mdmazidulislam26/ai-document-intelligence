@@ -1,6 +1,6 @@
 """
 Cross-document verification service supporting PDF-to-PDF and PDF-to-Spreadsheet (XLSX/XLS/CSV).
-Enforces document ownership checks on both primary and reference documents before extraction checks.
+Enforces strict tenant/owner isolation on both primary and reference documents without leaking metadata (GHR-03).
 """
 
 import os
@@ -187,7 +187,7 @@ class CrossVerificationService:
         if not doc:
             raise HTTPException(status_code=404, detail=f"Document #{document_id} not found.")
         if owner_id is not None and doc.owner_id != owner_id:
-            raise HTTPException(status_code=403, detail="Access denied to primary document.")
+            raise HTTPException(status_code=403, detail="Access denied to requested document.")
 
         stmt_ref = (
             select(Document)
@@ -198,7 +198,8 @@ class CrossVerificationService:
         if not ref_doc:
             raise HTTPException(status_code=404, detail=f"Reference document #{reference_document_id} not found.")
         if owner_id is not None and ref_doc.owner_id != owner_id:
-            raise HTTPException(status_code=403, detail="Access denied to reference document.")
+            # Generic 403 without leaking reference document metadata
+            raise HTTPException(status_code=403, detail="Access denied to requested document.")
 
         if not doc.extracted_invoice:
             raise HTTPException(

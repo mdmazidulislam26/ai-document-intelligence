@@ -1,6 +1,6 @@
 """
 Main entry point for the FastAPI Document Intelligence System.
-Configures explicit CORS origins, lifespan DB migrations, and API routers.
+Fails fast on startup if required database migrations are missing or inconsistent (GHR-05).
 """
 
 import logging
@@ -21,15 +21,12 @@ logger = logging.getLogger("main")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
-    Lifespan context manager initializing pgvector and Alembic schema head.
+    Lifespan context manager verifying Alembic migration status before serving traffic.
+    Does NOT swallow database or migration failures.
     """
     logger.info("Starting up Document Intelligence API...")
-    try:
-        await init_db()
-        logger.info("PostgreSQL database schema and pgvector extension initialized.")
-    except Exception as e:
-        logger.exception(f"Database initialization error: {type(e).__name__}")
-
+    mig_status = await init_db()
+    logger.info(f"Database migration verification passed: heads={mig_status.get('current_heads')}")
     yield
     logger.info("Shutting down Document Intelligence API...")
 
@@ -41,19 +38,17 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Explicit CORS policy (never allow wildcard origins with credentials)
 cors_kwargs = {
     "allow_origins": settings.get_allowed_origins(),
     "allow_credentials": True,
     "allow_methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    "allow_headers": ["Authorization", "Content-Type", "X-API-Key"],
+    "allow_headers": ["Authorization", "Content-Type", "X-API-Key", "X-Internal-Service-Token"],
 }
 if settings.ALLOWED_ORIGIN_REGEX:
     cors_kwargs["allow_origin_regex"] = settings.ALLOWED_ORIGIN_REGEX
 
 app.add_middleware(CORSMiddleware, **cors_kwargs)
 
-# Register API routes
 app.include_router(auth.router, prefix="/api")
 app.include_router(documents.router, prefix="/api")
 app.include_router(corrections.router, prefix="/api")

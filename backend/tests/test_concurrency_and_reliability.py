@@ -3,6 +3,7 @@ Unit and PostgreSQL integration tests for Concurrency & Celery Reliability.
 """
 
 import os
+import json
 import uuid
 import tempfile
 from decimal import Decimal
@@ -23,6 +24,12 @@ from models.schemas import InvoiceExtractionSchema, LineItemSchema
 from tasks.processing_tasks import process_document_task
 
 DEV_HEADERS = {"X-API-Key": "dev-local-api-key-change-me"}
+ADMIN_KEY = "admin-reconcile-test-key"
+ADMIN_HEADERS = {"X-API-Key": ADMIN_KEY}
+TEST_KEYS = json.dumps({
+    "dev-local-api-key-change-me": {"owner_id": "default", "role": "user"},
+    ADMIN_KEY: {"owner_id": "ops_admin", "role": "admin"},
+})
 
 
 def test_retry_exhaustion_marks_document_failed():
@@ -30,6 +37,8 @@ def test_retry_exhaustion_marks_document_failed():
     mock_doc.id = 303
     mock_doc.file_path = "/tmp/test_retry_exhaust.pdf"
     mock_doc.status = "queued"
+    mock_doc.processing_lease_until = None
+    mock_doc.worker_id = None
 
     mock_session = MagicMock()
     mock_session.query.return_value.filter.return_value.with_for_update.return_value.first.return_value = mock_doc
@@ -148,67 +157,68 @@ async def test_broker_outage_outbox_recovery_and_commit_failure_safety():
     created_file_path = None
 
     try:
-        transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-            with patch("tasks.processing_tasks.process_document_task.delay", side_effect=ConnectionError("Redis offline")):
-                resp = await client.post(
-                    "/api/documents/upload",
-                    files=[("files", ("outbox_test.pdf", b"%PDF-1.4\n%outbox", "application/pdf"))],
-                    headers=DEV_HEADERS,
-                )
-                assert resp.status_code == 202
-                created_doc_id = resp.json()[0]["id"]
+        with patch.object(settings, "API_KEYS_JSON", TEST_KEYS):
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                with patch("tasks.processing_tasks.process_document_task.delay", side_effect=ConnectionError("Redis offline")):
+                    resp = await client.post(
+                        "/api/documents/upload",
+                        files=[("files", ("outbox_test.pdf", b"%PDF-1.4\n%outbox", "application/pdf"))],
+                        headers=DEV_HEADERS,
+                    )
+                    assert resp.status_code == 202
+                    created_doc_id = resp.json()[0]["id"]
 
-            with sync_engine.connect() as conn:
-                row = conn.execute(
-                    text("SELECT status, file_path FROM documents WHERE id = :id"),
-                    {"id": created_doc_id},
-                ).mappings().first()
-                assert row["status"] == "queued"
-                created_file_path = row["file_path"]
+                with sync_engine.connect() as conn:
+                    row = conn.execute(
+                        text("SELECT status, file_path FROM documents WHERE id = :id"),
+                        {"id": created_doc_id},
+                    ).mappings().first()
+                    assert row["status"] == "queued"
+                    created_file_path = row["file_path"]
 
-                ob = conn.execute(
-                    text("SELECT status, attempts, last_error FROM task_outbox WHERE document_id = :id"),
-                    {"id": created_doc_id},
-                ).mappings().first()
-                assert ob["status"] == "pending"
-                assert ob["attempts"] >= 1
-                assert "Redis offline" in ob["last_error"]
+                    ob = conn.execute(
+                        text("SELECT status, attempts, last_error FROM task_outbox WHERE document_id = :id"),
+                        {"id": created_doc_id},
+                    ).mappings().first()
+                    assert ob["status"] == "pending"
+                    assert ob["attempts"] >= 1
+                    assert "Redis offline" in ob["last_error"]
 
-                conn.execute(
-                    text("UPDATE task_outbox SET next_attempt_at = NOW() - INTERVAL '5 seconds' WHERE document_id = :id"),
-                    {"id": created_doc_id},
-                )
-                conn.commit()
+                    conn.execute(
+                        text("UPDATE task_outbox SET next_attempt_at = NOW() - INTERVAL '5 seconds' WHERE document_id = :id"),
+                        {"id": created_doc_id},
+                    )
+                    conn.commit()
 
-            with patch("tasks.processing_tasks.process_document_task.delay") as mock_delay:
-                rec_resp = await client.post("/api/documents/reconcile", headers=DEV_HEADERS)
-                assert rec_resp.status_code == 200
-                rec_data = rec_resp.json()
-                assert rec_data["dispatched"] >= 1
-                assert mock_delay.called
+                # Reconcile requires admin/internal privileges (GHR-02)
+                with patch("tasks.processing_tasks.process_document_task.delay") as mock_delay:
+                    rec_resp = await client.post("/api/documents/reconcile", headers=ADMIN_HEADERS)
+                    assert rec_resp.status_code == 200
+                    assert rec_resp.json()["dispatched"] >= 1
+                    assert mock_delay.called
 
-            with sync_engine.connect() as conn:
-                ob_after = conn.execute(
-                    text("SELECT status FROM task_outbox WHERE document_id = :id"),
-                    {"id": created_doc_id},
-                ).scalar()
-                assert ob_after == "dispatched"
+                with sync_engine.connect() as conn:
+                    ob_after = conn.execute(
+                        text("SELECT status FROM task_outbox WHERE document_id = :id"),
+                        {"id": created_doc_id},
+                    ).scalar()
+                    assert ob_after == "dispatched"
 
-            async def failing_get_db():
-                async with TestSession() as session:
-                    with patch.object(session, "commit", side_effect=RuntimeError("DB commit failed")):
-                        yield session
+                async def failing_get_db():
+                    async with TestSession() as session:
+                        with patch.object(session, "commit", side_effect=RuntimeError("DB commit failed")):
+                            yield session
 
-            app.dependency_overrides[get_db] = failing_get_db
-            with patch("tasks.processing_tasks.process_document_task.delay") as mock_delay_fail:
-                resp_fail = await client.post(
-                    "/api/documents/upload",
-                    files=[("files", ("commit_fail.pdf", b"%PDF-1.4\n%fail", "application/pdf"))],
-                    headers=DEV_HEADERS,
-                )
-                assert resp_fail.status_code == 500
-                assert not mock_delay_fail.called
+                app.dependency_overrides[get_db] = failing_get_db
+                with patch("tasks.processing_tasks.process_document_task.delay") as mock_delay_fail:
+                    resp_fail = await client.post(
+                        "/api/documents/upload",
+                        files=[("files", ("commit_fail.pdf", b"%PDF-1.4\n%fail", "application/pdf"))],
+                        headers=DEV_HEADERS,
+                    )
+                    assert resp_fail.status_code == 500
+                    assert not mock_delay_fail.called
     finally:
         app.dependency_overrides.clear()
         await test_async_engine.dispose()

@@ -108,7 +108,7 @@ export default function SearchPage() {
                 <span>
                   Total:{' '}
                   {item.total_amount != null
-                    ? `${formatMoney(item.total_amount)} ${item.currency || 'USD'}`
+                    ? `${formatMoney(item.total_amount)}${item.currency ? ` ${item.currency}` : ''}`
                     : 'N/A'}
                 </span>
               </div>

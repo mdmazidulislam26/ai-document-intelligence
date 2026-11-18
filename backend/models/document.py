@@ -1,7 +1,7 @@
 """
 SQLAlchemy ORM models defining documents, extracted invoice data, validation logs,
 cross-document verification history, and transactional task outbox.
-Includes owner_id scoping on Document to prevent unauthorized cross-tenant access.
+Preserves unknown (null) currency without silent 'USD' defaulting (GHR-04).
 """
 
 from datetime import datetime
@@ -27,9 +27,7 @@ from core.config import settings
 
 
 class Document(Base):
-    """
-    Stores original uploaded file metadata, ownership scope, execution lifecycle, and error logs.
-    """
+    """Stores uploaded file metadata, ownership scope, execution lifecycle, and worker lease."""
     __tablename__ = "documents"
 
     id = Column(Integer, primary_key=True, index=True)
@@ -41,6 +39,10 @@ class Document(Base):
 
     status = Column(String(64), nullable=False, default="queued", index=True)
     error_message = Column(Text, nullable=True)
+
+    worker_id = Column(String(128), nullable=True)
+    processing_lease_until = Column(DateTime, nullable=True, index=True)
+    last_heartbeat_at = Column(DateTime, nullable=True)
 
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
@@ -84,7 +86,8 @@ class ExtractedInvoice(Base):
     subtotal = Column(Numeric(12, 2), nullable=True)
     tax = Column(Numeric(12, 2), nullable=True)
     total_amount = Column(Numeric(12, 2), nullable=True)
-    currency = Column(String(16), nullable=True, default="USD")
+    # Null when currency is unknown/absent in document (GHR-04)
+    currency = Column(String(16), nullable=True, default=None)
 
     line_items = Column(JSONB, nullable=False, default=list)
     is_manually_corrected = Column(Boolean, default=False, nullable=False)

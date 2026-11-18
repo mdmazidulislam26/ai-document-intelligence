@@ -1,7 +1,7 @@
 """
 Pydantic v2 validation schemas for API requests, responses, AI structured output,
 rich hybrid search results, and cross-document verification.
-Preserves exact Decimal precision without binary float intermediate artifacts.
+Preserves exact Decimal precision and unknown (null) currency.
 """
 
 import re
@@ -30,12 +30,16 @@ def _coerce_decimal(val: Any) -> Optional[Decimal]:
     return Decimal(str(val))
 
 
-# ---------------------------------------------------------
-# AI Extraction Schemas (Enforces Zero-Hallucination Policy)
-# ---------------------------------------------------------
+def _normalize_currency(val: Any) -> Optional[str]:
+    if val is None:
+        return None
+    cleaned = str(val).strip()
+    if not cleaned or cleaned.lower() in ("null", "none", "unknown", "n/a"):
+        return None
+    return cleaned.upper()
+
 
 class LineItemSchema(BaseModel):
-    """Represents an individual itemized line in an invoice."""
     description: Optional[str] = Field(default=None, description="Item description or name")
     quantity: Optional[Decimal] = Field(default=None, description="Quantity purchased")
     unit_price: Optional[Decimal] = Field(default=None, description="Price per individual unit")
@@ -50,10 +54,6 @@ class LineItemSchema(BaseModel):
 
 
 class InvoiceExtractionSchema(BaseModel):
-    """
-    Schema passed to the LLM for structured output.
-    Any missing or unreadable field must resolve to None.
-    """
     invoice_number: Optional[str] = Field(default=None, description="Official invoice identifier or reference code")
     invoice_date: Optional[str] = Field(default=None, description="Issue date in YYYY-MM-DD string format if discernable")
     supplier_name: Optional[str] = Field(default=None, description="Name of the billing vendor, supplier, or company")
@@ -71,13 +71,13 @@ class InvoiceExtractionSchema(BaseModel):
     def parse_monetary_fields(cls, v: Any) -> Optional[Decimal]:
         return _coerce_decimal(v)
 
+    @field_validator("currency", mode="before")
+    @classmethod
+    def parse_currency(cls, v: Any) -> Optional[str]:
+        return _normalize_currency(v)
 
-# ---------------------------------------------------------
-# API Response & Request Schemas
-# ---------------------------------------------------------
 
 class ValidationLogSchema(BaseModel):
-    """Validation failure detail model."""
     rule_name: str
     error_description: str
     severity: str
@@ -86,7 +86,6 @@ class ValidationLogSchema(BaseModel):
 
 
 class ExtractedInvoiceResponse(BaseModel):
-    """Structured invoice response returned to the client."""
     id: int
     document_id: int
     invoice_number: Optional[str]
@@ -104,7 +103,6 @@ class ExtractedInvoiceResponse(BaseModel):
 
 
 class DocumentResponse(BaseModel):
-    """Detailed document status and extracted content."""
     id: int
     filename: str
     file_type: str
@@ -120,7 +118,6 @@ class DocumentResponse(BaseModel):
 
 
 class DocumentStatusResponse(BaseModel):
-    """Lightweight response for polling processing progress."""
     id: int
     filename: str
     status: str
@@ -128,7 +125,6 @@ class DocumentStatusResponse(BaseModel):
 
 
 class ManualCorrectionRequest(BaseModel):
-    """Payload submitted when a user manually reviews and corrects invoice values."""
     invoice_number: Optional[str] = None
     invoice_date: Optional[date] = None
     supplier_name: Optional[str] = None
@@ -144,14 +140,17 @@ class ManualCorrectionRequest(BaseModel):
     def parse_monetary_fields(cls, v: Any) -> Optional[Decimal]:
         return _coerce_decimal(v)
 
+    @field_validator("currency", mode="before")
+    @classmethod
+    def parse_currency(cls, v: Any) -> Optional[str]:
+        return _normalize_currency(v)
+
 
 class CrossVerifyRequest(BaseModel):
-    """Request payload to cross-verify a processed document against a reference document."""
     reference_document_id: int = Field(..., ge=1, description="ID of the reference PDF, image, Excel, or CSV document")
 
 
 class CrossVerificationResponse(BaseModel):
-    """Structured response for cross-document verification."""
     id: int
     document_id: int
     reference_document_id: int
@@ -166,14 +165,12 @@ class CrossVerificationResponse(BaseModel):
 
 
 class SearchRequest(BaseModel):
-    """Request model for document search endpoint."""
     query: str
     search_type: str = Field(default="hybrid", description="keyword | semantic | hybrid")
     limit: int = Field(default=10, ge=1, le=50)
 
 
 class SearchResultItem(BaseModel):
-    """Single item returned in search queries with rich ranking metadata."""
     document_id: int
     filename: str
     supplier_name: Optional[str] = None

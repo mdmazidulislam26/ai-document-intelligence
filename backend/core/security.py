@@ -1,9 +1,6 @@
 """
 Authentication and tenant/owner-scoped authorization utilities.
-Supports:
-1. Constant-time X-API-Key verification mapped to owner_id and role.
-2. HMAC-SHA256 signed Bearer tokens with expiration (Authorization: Bearer <token>).
-Fail-closed in production when credentials or signing secrets are misconfigured.
+Includes admin / trusted-internal-service enforcement for global operations (GHR-02).
 """
 
 import hmac
@@ -105,10 +102,7 @@ async def get_current_principal(
     authorization: Optional[str] = Header(default=None),
     x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
 ) -> AuthPrincipal:
-    """
-    FastAPI authentication dependency.
-    Requires either a valid Bearer token or valid X-API-Key header.
-    """
+    """Requires a valid Bearer token or X-API-Key header."""
     if authorization and authorization.lower().startswith("bearer "):
         token = authorization[7:].strip()
         if token:
@@ -129,3 +123,33 @@ async def get_current_principal(
         detail="Authentication credentials required (X-API-Key or Authorization: Bearer).",
         headers={"WWW-Authenticate": "Bearer"},
     )
+
+
+async def require_admin_or_internal(
+    authorization: Optional[str] = Header(default=None),
+    x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
+    x_internal_service_token: Optional[str] = Header(default=None, alias="X-Internal-Service-Token"),
+) -> AuthPrincipal:
+    """
+    Restricts global administrative/system operations (such as /api/documents/reconcile)
+    to either an authenticated admin principal or a valid configured X-Internal-Service-Token.
+    """
+    if x_internal_service_token is not None:
+        configured_internal = (settings.INTERNAL_SERVICE_TOKEN or "").strip()
+        if configured_internal and hmac.compare_digest(
+            x_internal_service_token.strip().encode("utf-8"),
+            configured_internal.encode("utf-8"),
+        ):
+            return AuthPrincipal(owner_id="__internal_service__", role="admin")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Invalid internal service token.",
+        )
+
+    principal = await get_current_principal(authorization=authorization, x_api_key=x_api_key)
+    if not principal.is_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Administrator or trusted internal service privileges required.",
+        )
+    return principal

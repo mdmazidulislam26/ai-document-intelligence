@@ -1,17 +1,21 @@
 """
 Celery background worker pipeline tasks.
 Implements:
-- Idempotent state transitions (prevents duplicate processing on redelivery)
+- Renewable worker processing leases & periodic heartbeat thread (GHR-01)
+- Idempotent state transitions & atomic lease ownership validation
 - PostgreSQL transaction-scoped advisory locks (pg_advisory_xact_lock) for concurrent duplicate detection
 - Bounded exponential backoff with jitter for transient errors
 - Immediate terminal failure on permanent errors and retry exhaustion
-- Transactional outbox status synchronization and periodic reconciliation
 """
 
+import os
+import socket
+import uuid
 import hashlib
 import logging
 import random
-from datetime import datetime
+import threading
+from datetime import datetime, timedelta
 from decimal import Decimal
 import httpx
 from celery.exceptions import MaxRetriesExceededError
@@ -45,8 +49,79 @@ TRANSIENT_EXCEPTIONS = (
 )
 
 
+def _generate_worker_id() -> str:
+    return f"{socket.gethostname()}:{os.getpid()}:{threading.get_ident()}:{uuid.uuid4().hex[:8]}"
+
+
+def renew_processing_lease(document_id: int, worker_id: str, lease_seconds: int = None) -> bool:
+    """
+    Atomically renews processing_lease_until and last_heartbeat_at ONLY if this worker_id
+    still owns the active 'processing' lease for document_id.
+    """
+    lease_secs = lease_seconds if lease_seconds is not None else settings.WORKER_LEASE_SECONDS
+    now = datetime.utcnow()
+    new_lease = now + timedelta(seconds=lease_secs)
+
+    hb_session = SessionLocalSync()
+    try:
+        updated = (
+            hb_session.query(Document)
+            .filter(
+                Document.id == document_id,
+                Document.status == "processing",
+                Document.worker_id == worker_id,
+            )
+            .update(
+                {
+                    Document.last_heartbeat_at: now,
+                    Document.processing_lease_until: new_lease,
+                    Document.updated_at: now,
+                },
+                synchronize_session=False,
+            )
+        )
+        hb_session.commit()
+        return bool(updated and updated > 0)
+    except Exception as hb_err:
+        hb_session.rollback()
+        logger.warning(f"Heartbeat renewal error for doc #{document_id}: {type(hb_err).__name__}")
+        return False
+    finally:
+        hb_session.close()
+
+
+class _LeaseHeartbeat:
+    """Context manager maintaining a background lease-renewal thread during long OCR/AI jobs."""
+
+    def __init__(self, document_id: int, worker_id: str, interval_seconds: int = None, lease_seconds: int = None):
+        self.document_id = document_id
+        self.worker_id = worker_id
+        self.interval = interval_seconds if interval_seconds is not None else settings.WORKER_HEARTBEAT_INTERVAL_SECONDS
+        self.lease_seconds = lease_seconds if lease_seconds is not None else settings.WORKER_LEASE_SECONDS
+        self._stop_event = threading.Event()
+        self._thread = None
+
+    def _run(self) -> None:
+        while not self._stop_event.wait(self.interval):
+            still_owned = renew_processing_lease(
+                self.document_id, self.worker_id, lease_seconds=self.lease_seconds
+            )
+            if not still_owned:
+                break
+
+    def __enter__(self):
+        if self.interval > 0:
+            self._thread = threading.Thread(target=self._run, daemon=True)
+            self._thread.start()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self._stop_event.set()
+        if self._thread is not None and self._thread.is_alive():
+            self._thread.join(timeout=2.0)
+
+
 def _compute_business_lock_key(supplier_name: str, invoice_number: str) -> int:
-    """Computes a deterministic signed 64-bit PostgreSQL advisory lock key for (supplier, invoice_number)."""
     raw = f"{supplier_name.strip().lower()}|{invoice_number.strip().lower()}".encode("utf-8")
     digest = hashlib.sha256(raw).digest()[:8]
     return int.from_bytes(digest, byteorder="big", signed=True)
@@ -67,12 +142,20 @@ def _mark_outbox_status(session, document_id: int, new_status: str, error_msg: s
             entry.last_error = error_msg
 
 
+def _clear_lease_fields(doc: Document) -> None:
+    doc.worker_id = None
+    doc.processing_lease_until = None
+    doc.last_heartbeat_at = None
+
+
 @celery_app.task(name="tasks.processing_tasks.process_document_task", bind=True, max_retries=3)
 def process_document_task(self, document_id: int):
     """
-    Idempotent background Celery pipeline task.
+    Idempotent, lease-protected background Celery pipeline task.
     """
     session = SessionLocalSync()
+    worker_id = _generate_worker_id()
+
     try:
         doc = session.query(Document).filter(Document.id == document_id).with_for_update().first()
         if not doc:
@@ -80,60 +163,78 @@ def process_document_task(self, document_id: int):
             return False
 
         retries = getattr(self.request, "retries", 0) or 0
+        now = datetime.utcnow()
 
-        # Idempotency guard: skip duplicate deliveries if already terminally processed or actively running
+        # Idempotency guard on terminal states
         if doc.status in ("validated", "requires_manual_review", "failed"):
             logger.info(f"Document #{document_id} already in terminal state '{doc.status}'. Skipping duplicate delivery.")
             _mark_outbox_status(session, document_id, "completed")
             session.commit()
             return True
 
+        # Active lease guard against concurrent / duplicate deliveries
         if doc.status == "processing" and retries == 0:
-            logger.info(f"Document #{document_id} is already being processed by another worker. Skipping.")
-            return False
+            lease_until = getattr(doc, "processing_lease_until", None)
+            if isinstance(lease_until, datetime) and lease_until > now:
+                logger.info(
+                    f"Document #{document_id} holds active lease until {lease_until.isoformat()} "
+                    f"(worker={getattr(doc, 'worker_id', None)}). Skipping duplicate delivery."
+                )
+                return False
+            if lease_until is None:
+                logger.info(f"Document #{document_id} is already being processed by another worker. Skipping.")
+                return False
 
+        # Claim atomic lease
         doc.status = "processing"
+        doc.worker_id = worker_id
+        doc.last_heartbeat_at = now
+        doc.processing_lease_until = now + timedelta(seconds=settings.WORKER_LEASE_SECONDS)
         session.commit()
 
-        # Step 1: Parse file text (outside long DB lock)
-        try:
-            raw_text, _ = DocumentParserService.extract_full_text(doc.file_path)
-        except Exception as parse_err:
-            doc = session.query(Document).filter(Document.id == document_id).with_for_update().first()
-            if doc:
-                doc.status = "failed"
-                doc.error_message = f"File parsing failed: {str(parse_err)}"
-                _mark_outbox_status(session, document_id, "failed", doc.error_message)
-                session.commit()
-            return False
+        # Maintain lease heartbeat during potentially long OCR / AI operations
+        with _LeaseHeartbeat(document_id=document_id, worker_id=worker_id):
+            # Step 1: Parse file text
+            try:
+                raw_text, _ = DocumentParserService.extract_full_text(doc.file_path)
+            except Exception as parse_err:
+                doc = session.query(Document).filter(Document.id == document_id).with_for_update().first()
+                if doc:
+                    doc.status = "failed"
+                    doc.error_message = f"File parsing failed: {str(parse_err)}"
+                    _clear_lease_fields(doc)
+                    _mark_outbox_status(session, document_id, "failed", doc.error_message)
+                    session.commit()
+                return False
 
-        if not raw_text.strip():
-            doc = session.query(Document).filter(Document.id == document_id).with_for_update().first()
-            if doc:
-                doc.status = "failed"
-                doc.error_message = "No readable text extracted from document."
-                _mark_outbox_status(session, document_id, "failed", doc.error_message)
-                session.commit()
-            return False
+            if not raw_text.strip():
+                doc = session.query(Document).filter(Document.id == document_id).with_for_update().first()
+                if doc:
+                    doc.status = "failed"
+                    doc.error_message = "No readable text extracted from document."
+                    _clear_lease_fields(doc)
+                    _mark_outbox_status(session, document_id, "failed", doc.error_message)
+                    session.commit()
+                return False
 
-        # Step 2: AI extraction (raises AITransientError on network/rate-limit)
-        ai_service = AIExtractorService()
-        extracted_data = ai_service.extract_invoice_data(raw_text)
+            # Step 2: AI extraction
+            ai_service = AIExtractorService()
+            extracted_data = ai_service.extract_invoice_data(raw_text)
 
-        # Step 3: Deterministic Math & Required Field Validations
-        val_errors = []
-        val_errors.extend(DocumentValidator.validate_math(extracted_data))
-        val_errors.extend(DocumentValidator.validate_required_fields(extracted_data))
+            # Step 3: Deterministic Math & Required Field Validations
+            val_errors = []
+            val_errors.extend(DocumentValidator.validate_math(extracted_data))
+            val_errors.extend(DocumentValidator.validate_required_fields(extracted_data))
 
-        # Step 4: Embedding generation (CPU-bound, done before acquiring persistence locks)
-        summary = (
-            f"Supplier: {extracted_data.supplier_name or 'N/A'}. "
-            f"Invoice: {extracted_data.invoice_number or 'N/A'}. "
-            f"Total: {extracted_data.total_amount or Decimal('0.00')} {extracted_data.currency or 'N/A'}. "
-            f"Customer: {extracted_data.customer_name or 'N/A'}. "
-            f"Text: {raw_text[:800]}"
-        )
-        embedding_vector = VectorService.generate_embedding(summary)
+            # Step 4: Embedding generation
+            summary = (
+                f"Supplier: {extracted_data.supplier_name or 'N/A'}. "
+                f"Invoice: {extracted_data.invoice_number or 'N/A'}. "
+                f"Total: {extracted_data.total_amount or Decimal('0.00')} {extracted_data.currency or 'N/A'}. "
+                f"Customer: {extracted_data.customer_name or 'N/A'}. "
+                f"Text: {raw_text[:800]}"
+            )
+            embedding_vector = VectorService.generate_embedding(summary)
 
         parsed_date = None
         if extracted_data.invoice_date:
@@ -147,12 +248,18 @@ def process_document_task(self, document_id: int):
         tax_val = quantize_money(extracted_data.tax)
         total_val = quantize_money(extracted_data.total_amount)
 
-        # Step 5: Atomic Persistence Transaction with Advisory Lock for Duplicate Detection
+        # Step 5: Final Atomic Persistence Transaction
         doc = session.query(Document).filter(Document.id == document_id).with_for_update().first()
         if not doc:
             return False
 
-        # Serialize duplicate check + insert per (supplier_name, invoice_number) business key
+        # Verify lease ownership wasn't superseded by another worker after expiration
+        current_owner = getattr(doc, "worker_id", None)
+        if current_owner is not None and current_owner != worker_id:
+            logger.warning(f"Document #{document_id} lease was taken over by '{current_owner}'. Aborting stale write.")
+            session.rollback()
+            return False
+
         if extracted_data.invoice_number and extracted_data.supplier_name:
             lock_key = _compute_business_lock_key(extracted_data.supplier_name, extracted_data.invoice_number)
             session.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": lock_key})
@@ -211,6 +318,7 @@ def process_document_task(self, document_id: int):
 
         doc.status = "requires_manual_review" if has_critical else "validated"
         doc.error_message = None
+        _clear_lease_fields(doc)
         _mark_outbox_status(session, document_id, "completed")
         session.commit()
         return True
@@ -219,7 +327,7 @@ def process_document_task(self, document_id: int):
         session.rollback()
         retry_count = getattr(self.request, "retries", 0) or 0
         backoff = (2 ** retry_count) * 4 + random.uniform(0.5, 2.0)
-        logger.warning(f"Transient error processing doc #{document_id}: {trans_exc}. Retrying in {backoff:.2f}s...")
+        logger.warning(f"Transient error processing doc #{document_id}: {type(trans_exc).__name__}. Retrying in {backoff:.2f}s...")
         try:
             raise self.retry(exc=trans_exc, countdown=backoff)
         except MaxRetriesExceededError:
@@ -228,17 +336,19 @@ def process_document_task(self, document_id: int):
             if doc:
                 doc.status = "failed"
                 doc.error_message = f"Transient failure max retries exceeded: {str(trans_exc)}"
+                _clear_lease_fields(doc)
                 _mark_outbox_status(session, document_id, "failed", doc.error_message)
                 session.commit()
             return False
 
     except Exception as e:
         session.rollback()
-        logger.exception(f"Permanent/Unhandled error processing doc #{document_id}: {e}")
+        logger.exception(f"Permanent/Unhandled error processing doc #{document_id}: {type(e).__name__}")
         doc = session.query(Document).filter(Document.id == document_id).with_for_update().first()
         if doc:
             doc.status = "failed"
             doc.error_message = str(e)
+            _clear_lease_fields(doc)
             _mark_outbox_status(session, document_id, "failed", doc.error_message)
             session.commit()
         return False
@@ -249,7 +359,7 @@ def process_document_task(self, document_id: int):
 
 @celery_app.task(name="tasks.processing_tasks.reconcile_outbox_task")
 def reconcile_outbox_task():
-    """Periodic Celery Beat task reconciling pending outbox records and stuck documents."""
+    """Periodic Celery Beat task reconciling pending outbox records and expired-lease documents."""
     session = SessionLocalSync()
     try:
         return OutboxService.reconcile_pending_and_stuck_sync(session)
