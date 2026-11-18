@@ -429,17 +429,19 @@ def process_document_task(self, document_id: int):
                     f"Transient failure max retries exceeded: {str(trans_exc)}",
                 )
             return False
+        except Retry:
+            # An exception raised inside this except block cannot be caught by
+            # a sibling outer except. Release the lease here before re-raising.
+            if doc is not None and claimed_epoch is not None:
+                _release_document_lease_for_retry(session, document_id, worker_id, claimed_epoch)
+            else:
+                session.rollback()
+            raise
 
     except Retry:
-        # Release this attempt's lease before Celery delivers the retry message.
-        # If ownership was already superseded, the CAS safely does nothing.
-        logger.warning(
-            "Caught Celery Retry for document #%s (doc_loaded=%s, claimed_epoch=%r, worker=%s).",
-            document_id, doc is not None, claimed_epoch, worker_id,
-        )
+        # Also handle Retry raised by any other part of the processing pipeline.
         if doc is not None and claimed_epoch is not None:
-            released = _release_document_lease_for_retry(session, document_id, worker_id, claimed_epoch)
-            logger.warning("Celery retry lease release for document #%s: %s.", document_id, released)
+            _release_document_lease_for_retry(session, document_id, worker_id, claimed_epoch)
         else:
             session.rollback()
         raise
