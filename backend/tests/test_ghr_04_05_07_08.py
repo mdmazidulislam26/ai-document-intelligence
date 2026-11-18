@@ -9,6 +9,7 @@ Targeted automated tests for Phase 5.2 Part 2:
 import os
 import sys
 import uuid
+import json
 import subprocess
 from decimal import Decimal
 from unittest.mock import patch
@@ -32,12 +33,7 @@ BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPO_ROOT = os.path.dirname(BACKEND_DIR)
 
 
-# -------------------------------------------------------------
-# GHR-04: Preserve Unknown Currency
-# -------------------------------------------------------------
-
 def test_ghr04_orm_and_schema_default_currency_is_none():
-    """GHR-04: ExtractedInvoice and InvoiceExtractionSchema must default currency to None, never USD."""
     schema = InvoiceExtractionSchema(invoice_number="INV-NOCURR-1", total_amount=Decimal("100.00"))
     assert schema.currency is None
 
@@ -47,13 +43,6 @@ def test_ghr04_orm_and_schema_default_currency_is_none():
 
 @pytest.mark.asyncio
 async def test_ghr04_unknown_currency_preserved_across_pipeline_and_corrections():
-    """
-    GHR-04:
-    1. AI extraction with currency=None stores currency=NULL in DB.
-    2. API GET returns currency=None.
-    3. Editing an unrelated field (invoice_number) preserves currency=None.
-    4. Explicit correction to 'EUR' updates currency, and clearing to None/'' restores NULL.
-    """
     sync_engine = create_engine(settings.SYNC_DATABASE_URL)
     test_async_engine = create_async_engine(settings.DATABASE_URL)
     TestSession = async_sessionmaker(bind=test_async_engine, class_=AsyncSession, expire_on_commit=False)
@@ -139,20 +128,8 @@ async def test_ghr04_unknown_currency_preserved_across_pipeline_and_corrections(
         sync_engine.dispose()
 
 
-# -------------------------------------------------------------
-# GHR-05: Enforce Database Migration Safety
-# -------------------------------------------------------------
-
 @pytest.mark.asyncio
 async def test_ghr05_migration_safety_checks_and_fail_fast():
-    """
-    GHR-05:
-    1. DB at latest head passes verify_migration_status_sync.
-    2. Fresh unmigrated schema fails verify_migration_status_sync.
-    3. DB behind head fails verify_migration_status_sync.
-    4. Unknown/missing revision fails verify_migration_status_sync.
-    5. Production lifespan refuses to start if migration verification fails (never swallowed).
-    """
     engine = create_engine(settings.SYNC_DATABASE_URL)
     schema_name = "test_ghr05_mig_safety"
     cfg = AlembicConfig(os.path.join(BACKEND_DIR, "alembic.ini"))
@@ -194,7 +171,14 @@ async def test_ghr05_migration_safety_checks_and_fail_fast():
             with pytest.raises(MigrationSafetyError, match="unknown/missing Alembic revision"):
                 verify_migration_status_sync(connection=conn, alembic_cfg=cfg)
 
+        secure_prod_key = "a" * 32
+        secure_keys_json = json.dumps({"prod-key-1234567890123456": {"owner_id": "admin", "role": "admin"}})
         with patch.object(settings, "ENVIRONMENT", "production"), \
+             patch.object(settings, "AUTH_SECRET_KEY", secure_prod_key), \
+             patch.object(settings, "API_KEYS_JSON", secure_keys_json), \
+             patch.object(settings, "INTERNAL_SERVICE_TOKEN", "b" * 32), \
+             patch.object(settings, "DATABASE_URL", "postgresql+asyncpg://app_user:StrongProdPass99!@db:5432/doc_intelligence"), \
+             patch.object(settings, "SYNC_DATABASE_URL", "postgresql+psycopg2://app_user:StrongProdPass99!@db:5432/doc_intelligence"), \
              patch.object(settings, "AUTO_RUN_MIGRATIONS", None), \
              patch("core.database.verify_migration_status_sync", side_effect=MigrationSafetyError("DB behind head")):
             with pytest.raises(MigrationSafetyError, match="DB behind head"):
@@ -214,15 +198,7 @@ async def test_ghr05_migration_safety_checks_and_fail_fast():
         engine.dispose()
 
 
-# -------------------------------------------------------------
-# GHR-07: Distributed Rate Limiting
-# -------------------------------------------------------------
-
 def test_ghr07_rate_limit_keys_consistent_across_processes():
-    """
-    GHR-07: Spawns two separate Python subprocesses with different PYTHONHASHSEED values
-    and asserts compute_rate_limit_subject produces identical deterministic keys.
-    """
     code = (
         "import sys; sys.path.insert(0, '.'); "
         "from core.rate_limit import compute_rate_limit_subject; "
@@ -243,7 +219,6 @@ def test_ghr07_rate_limit_keys_consistent_across_processes():
 
 
 def test_ghr07_atomic_redis_rate_limiting():
-    """GHR-07: Verifies Redis sliding window enforces limit atomically and does not store rejected hits."""
     RateLimiter.reset()
     try:
         subj = compute_rate_limit_subject("127.0.0.1", "worker-test-key")
@@ -261,12 +236,7 @@ def test_ghr07_atomic_redis_rate_limiting():
         RateLimiter.reset()
 
 
-# -------------------------------------------------------------
-# GHR-08: Docker Compose Credentials
-# -------------------------------------------------------------
-
 def test_ghr08_docker_compose_uses_env_vars_not_hardcoded_credentials():
-    """GHR-08: Verifies docker-compose.yml and .env.example avoid hardcoded DB credentials."""
     compose_path = os.path.join(REPO_ROOT, "docker-compose.yml")
     env_example_path = os.path.join(REPO_ROOT, ".env.example")
 

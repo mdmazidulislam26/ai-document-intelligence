@@ -2,7 +2,7 @@
 Automated tests for the GHR-06 evaluation framework:
 1. Reproducible dataset generation across all required formats.
 2. Real DocumentParserService & Tesseract OCR execution on generated fixtures.
-3. Metric calculation accuracy (field accuracy, line-item F1, hallucination rate, arithmetic consistency).
+3. Metric calculation accuracy (field accuracy, strict 4-field line-item F1, hallucination rate, arithmetic consistency).
 """
 
 import os
@@ -21,13 +21,12 @@ if EVAL_DIR not in sys.path:
     sys.path.insert(0, EVAL_DIR)
 
 from generate_dataset import build_dataset, DATASET_DIR
-from evaluate import compare_scalar_field, evaluate_line_items, compute_benchmark_summary
-from models.schemas import LineItemSchema
+from evaluate import compare_scalar_field, evaluate_line_items, compute_benchmark_summary, classify_arithmetic_status
+from models.schemas import LineItemSchema, InvoiceExtractionSchema
 from services.document_parser import DocumentParserService
 
 
 def test_dataset_generator_creates_all_formats_and_parsers_read_them():
-    """Verifies real binary fixtures for all formats are created and parsed cleanly."""
     manifest = build_dataset()
     assert len(manifest) == 10
 
@@ -76,11 +75,17 @@ def test_dataset_generator_creates_all_formats_and_parsers_read_them():
 
 
 def test_evaluation_metrics_hallucination_and_line_item_f1():
-    """Verifies exact calculation of scalar accuracy, hallucination rate, line-item F1, and math consistency."""
     assert compare_scalar_field("currency", None, None) is True
     assert compare_scalar_field("currency", "USD", None) is False
     assert compare_scalar_field("total_amount", Decimal("100.02"), 100.00) is True
     assert compare_scalar_field("total_amount", Decimal("100.50"), 100.00) is False
+
+    # Arithmetic status: not_evaluable when monetary fields missing
+    empty_extraction = InvoiceExtractionSchema()
+    assert classify_arithmetic_status(empty_extraction, []) == "not_evaluable"
+
+    populated_extraction = InvoiceExtractionSchema(subtotal=Decimal("100.00"), total_amount=Decimal("110.00"))
+    assert classify_arithmetic_status(populated_extraction, []) == "pass"
 
     pred_items = [
         LineItemSchema(description="Cloud Server Hosting", quantity=Decimal("2"), unit_price=Decimal("150.00"), total=Decimal("300.00")),
@@ -101,6 +106,7 @@ def test_evaluation_metrics_hallucination_and_line_item_f1():
         {
             "id": "d1",
             "status": "success",
+            "extracted_field_count": 7,
             "parse_sec": 0.2,
             "ai_sec": 0.8,
             "total_sec": 1.0,
@@ -118,11 +124,13 @@ def test_evaluation_metrics_hallucination_and_line_item_f1():
             "hallucinated_fields": 1,
             "line_items_metrics": li,
             "expected_math_valid": True,
+            "math_status": "pass",
             "math_passed": True,
         },
         {
             "id": "d2",
             "status": "failed",
+            "extracted_field_count": 0,
             "parse_sec": 0.1,
             "ai_sec": 0.0,
             "total_sec": 0.1,
@@ -131,11 +139,12 @@ def test_evaluation_metrics_hallucination_and_line_item_f1():
             "hallucinated_fields": 0,
             "line_items_metrics": {"matched": 0, "pred_count": 0, "truth_count": 0, "precision": 0.0, "recall": 0.0, "f1": 0.0, "exact": False},
             "expected_math_valid": False,
+            "math_status": "fail",
             "math_passed": False,
         },
     ]
     summary = compute_benchmark_summary(records)
-    assert summary["success_rate_pct"] == 50.0
+    assert summary["execution_success_rate_pct"] == 50.0
     assert summary["failure_rate_pct"] == 50.0
     assert summary["hallucination_rate_pct"] == 50.0
     assert summary["arithmetic_consistency_pct"] == 100.0
