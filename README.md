@@ -49,8 +49,9 @@ flowchart TD
     Validator --> Embedder
     Embedder --> Postgres
     SearchCtrl -->|GIN FTS + HNSW Cosine RRF| Postgres
+```
 
-2. Key Features
+## 2. Key Features
 
   - Multi-Format Parsing: Supports digital PDFs, scanned PDFs (OpenCV deskew +
     Tesseract OCR fallback), JPG, PNG, TIFF, and multi-sheet XLSX/CSV. The
@@ -90,7 +91,7 @@ flowchart TD
     (frontend/lib/money.ts), preserving unknown currency without false USD
     defaulting.
 
-3. How to Run in GitHub Codespaces / Local Docker
+## 3. How to Run in GitHub Codespaces / Local Docker
 
 Step A: Configure Environment Variables
 
@@ -142,7 +143,7 @@ To verify the production build:
 
 cd frontend && npm run build
 
-4. Production Deployment Safety
+## 4. Production Deployment Safety
 
 In production, configure strong random secrets and use the hardened production configuration. The dedicated `migrate` service runs `alembic upgrade head`; the API and worker wait for that one-shot service to complete successfully.
 
