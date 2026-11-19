@@ -8,14 +8,14 @@ const API_KEY_STORAGE_KEY = 'docintel_api_key';
 const DEFAULT_DEV_KEY = 'dev-local-api-key-change-me';
 
 export const getApiBaseUrl = (): string => {
-  if (process.env.NEXT_PUBLIC_API_URL) {
-    return process.env.NEXT_PUBLIC_API_URL.replace(/\/+$/, '');
-  }
   if (typeof window !== 'undefined') {
     const host = window.location.hostname;
     if (host.includes('github.dev') || host.includes('app.github.dev')) {
-      return window.location.origin.replace('-3000', '-8000');
+      return '';
     }
+  }
+  if (process.env.NEXT_PUBLIC_API_URL) {
+    return process.env.NEXT_PUBLIC_API_URL.replace(/\/+$/, '');
   }
   return 'http://localhost:8000';
 };
@@ -41,11 +41,10 @@ export function setStoredApiKey(key: string): void {
   }
 }
 
-export const apiClient = axios.create({
-  baseURL: API_BASE_URL,
-});
+export const apiClient = axios.create();
 
 apiClient.interceptors.request.use((config) => {
+  config.baseURL = getApiBaseUrl();
   const key = getStoredApiKey();
   if (key) {
     config.headers['X-API-Key'] = key;

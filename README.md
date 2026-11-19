@@ -51,6 +51,86 @@ flowchart TD
     SearchCtrl -->|GIN FTS + HNSW Cosine RRF| Postgres
 ```
 
+### Database Schema & ER Diagram (PostgreSQL 16 + pgvector)
+
+Derived from `backend/models/document.py` and Alembic migrations `0001` through `0009`:
+
+```mermaid
+erDiagram
+    DOCUMENTS ||--o| EXTRACTED_INVOICES : "has one (CASCADE)"
+    DOCUMENTS ||--o{ VALIDATION_LOGS : "has many (CASCADE)"
+    DOCUMENTS ||--o{ CROSS_VERIFICATION_HISTORY : "primary document_id"
+    DOCUMENTS ||--o{ CROSS_VERIFICATION_HISTORY : "reference_document_id"
+    DOCUMENTS ||--o{ TASK_OUTBOX : "dispatches (CASCADE)"
+
+    DOCUMENTS {
+        int id PK
+        varchar owner_id "indexed, default default"
+        varchar filename
+        varchar file_path UK
+        varchar file_type
+        int file_size_bytes
+        varchar status "queued|processing|validated|requires_manual_review|failed"
+        text error_message
+        varchar worker_id
+        int lease_epoch "monotonic CAS fencing token"
+        datetime processing_lease_until "indexed"
+        datetime last_heartbeat_at
+        datetime created_at
+        datetime updated_at
+    }
+
+    EXTRACTED_INVOICES {
+        int id PK
+        int document_id FK "UNIQUE"
+        varchar invoice_number "indexed, lower() idx"
+        date invoice_date
+        varchar supplier_name "indexed, lower() idx"
+        varchar customer_name
+        numeric subtotal "NUMERIC(12,2)"
+        numeric tax "NUMERIC(12,2)"
+        numeric total_amount "NUMERIC(12,2)"
+        varchar currency "nullable, no default"
+        jsonb line_items
+        boolean is_manually_corrected
+        text raw_text
+        tsvector search_vector "GENERATED STORED, GIN indexed"
+        vector embedding "vector(384), HNSW cosine"
+    }
+
+    VALIDATION_LOGS {
+        int id PK
+        int document_id FK
+        varchar rule_name
+        text error_description
+        varchar severity "WARNING|ERROR|CRITICAL"
+        datetime created_at
+    }
+
+    CROSS_VERIFICATION_HISTORY {
+        int id PK
+        int document_id FK
+        int reference_document_id FK
+        varchar verification_mode "pdf_to_pdf|pdf_to_spreadsheet"
+        varchar overall_status
+        int discrepancy_count
+        jsonb comparison_details
+        datetime created_at
+    }
+
+    TASK_OUTBOX {
+        int id PK
+        int document_id FK
+        varchar task_name
+        varchar status "pending|dispatched|completed|failed"
+        int attempts
+        text last_error
+        datetime created_at
+        datetime dispatched_at
+        datetime next_attempt_at "indexed (status, next_attempt_at)"
+    }
+```
+
 ## 2. Key Features
 
   - Multi-Format Parsing: Supports digital PDFs, scanned PDFs (OpenCV deskew +
@@ -163,3 +243,23 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml logs migrate
 ```
 
 See backend/MIGRATIONS.md and backend/SECURITY.md for full deployment guides.
+
+## 5. REST API Endpoints & Authentication
+
+All `/api/documents/*` and `/api/search` routes require `X-API-Key` or `Authorization: Bearer <token>`.
+In Next.js development mode (`npm run dev`), the dev API key is pre-loaded; in `next start` (production mode), enter the API key in the top Navbar.
+
+| Method | Endpoint | Purpose |
+|---|---|---|
+| `GET` | `/api/health` | Service health & configured provider check |
+| `POST` | `/api/auth/token` | Exchange `X-API-Key` for short-lived Bearer JWT |
+| `POST` | `/api/documents/upload` | Multi-file upload (PDF, JPG, PNG, TIFF, XLSX, XLS, CSV) |
+| `GET` | `/api/documents` | List owned documents with status & extracted results |
+| `GET` | `/api/documents/{id}` | Inspect extracted fields, line items, and validation logs |
+| `GET` | `/api/documents/{id}/status` | Lightweight processing status polling |
+| `PUT` | `/api/documents/{id}/correct` | Manual correction, re-validation, and embedding refresh |
+| `POST` | `/api/documents/{id}/reprocess` | Lease-safe requeue for failed/pending documents |
+| `POST` | `/api/documents/{id}/cross-verify` | Cross-verify PDF vs PDF or PDF vs Excel/CSV |
+| `GET` | `/api/documents/{id}/cross-verify/history` | View persistent cross-verification audit history |
+| `POST` | `/api/documents/reconcile` | Admin/internal outbox & expired-lease reconciliation |
+| `GET` | `/api/search?q=...&type=hybrid` | Keyword (GIN FTS), Semantic (pgvector HNSW), or Hybrid (RRF) search |

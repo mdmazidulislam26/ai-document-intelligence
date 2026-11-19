@@ -2,11 +2,13 @@
 AI information extraction service.
 Uses Groq free API with strict JSON schema outputs.
 Parses JSON floats directly into Decimal, implements typed exceptions,
+auto-splits HTTP 413 oversized chunks, paces Groq RateLimitError retries,
 merges multi-chunk extractions deterministically, and never logs confidential invoice text.
 """
 
 import json
 import re
+import time
 import logging
 from decimal import Decimal
 from typing import List
@@ -62,8 +64,37 @@ class AIExtractorService:
             api_key=self.api_key or "missing_key",
         )
 
-    def extract_from_chunk(self, chunk_text: str) -> InvoiceExtractionSchema:
-        """Sends a single chunk to the LLM with strict JSON schema enforcement."""
+    def _call_chat_completion(self, system_prompt: str, user_prompt: str) -> str:
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                response_format={"type": "json_object"},
+                temperature=0.0,
+                max_tokens=1500,
+            )
+            return response.choices[0].message.content or "{}"
+        except (RateLimitError, AuthenticationError, APIConnectionError):
+            raise
+        except APIStatusError as status_err:
+            if status_err.status_code in [401, 403, 413, 429, 502, 503, 504]:
+                raise
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.0,
+                max_tokens=1500,
+            )
+            return response.choices[0].message.content or "{}"
+
+    def extract_from_chunk(self, chunk_text: str, _split_depth: int = 0) -> InvoiceExtractionSchema:
+        """Sends a single chunk to the LLM with strict JSON schema enforcement, 413 auto-split, and 429 pacing."""
         if not chunk_text or not chunk_text.strip():
             return InvoiceExtractionSchema()
 
@@ -95,42 +126,46 @@ class AIExtractorService:
 
         user_prompt = f"Document Content:\n\n{chunk_text}"
         raw_response = ""
+        max_rl_attempts = 5
 
-        try:
+        for attempt in range(max_rl_attempts):
             try:
-                response = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt},
-                    ],
-                    response_format={"type": "json_object"},
-                    temperature=0.0,
-                    max_tokens=3000,
-                )
-                raw_response = response.choices[0].message.content or "{}"
-            except Exception:
-                response = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt},
-                    ],
-                    temperature=0.0,
-                    max_tokens=3000,
-                )
-                raw_response = response.choices[0].message.content or "{}"
-
-        except AuthenticationError as auth_err:
-            raise AIAuthenticationError("Groq API authentication failed.") from auth_err
-        except (RateLimitError, APIConnectionError) as trans_err:
-            raise AITransientError(f"Transient Groq API error: {type(trans_err).__name__}") from trans_err
-        except APIStatusError as status_err:
-            if status_err.status_code in [429, 502, 503, 504]:
-                raise AITransientError(f"Groq server status {status_err.status_code}") from status_err
-            raise AIExtractionError(f"Groq API status error: {status_err.status_code}") from status_err
-        except Exception as e:
-            raise AIExtractionError(f"Unexpected AI client error: {type(e).__name__}") from e
+                raw_response = self._call_chat_completion(system_prompt, user_prompt)
+                break
+            except AuthenticationError as auth_err:
+                raise AIAuthenticationError("Groq API authentication failed.") from auth_err
+            except RateLimitError as rl_err:
+                if attempt == max_rl_attempts - 1:
+                    raise AITransientError("Transient Groq API error: RateLimitError") from rl_err
+                retry_after = None
+                resp = getattr(rl_err, "response", None)
+                if resp is not None and getattr(resp, "headers", None):
+                    raw_ra = resp.headers.get("retry-after")
+                    if raw_ra:
+                        try:
+                            retry_after = float(raw_ra)
+                        except ValueError:
+                            retry_after = None
+                wait_sec = min(65.0, (retry_after + 1.0) if retry_after is not None else 12.0 * (attempt + 1))
+                logger.warning(f"Groq rate limit hit; pacing for {wait_sec:.1f}s (attempt {attempt + 1}/{max_rl_attempts})")
+                time.sleep(wait_sec)
+            except APIConnectionError as trans_err:
+                raise AITransientError(f"Transient Groq API error: {type(trans_err).__name__}") from trans_err
+            except APIStatusError as status_err:
+                if status_err.status_code == 413 and len(chunk_text) > 2000 and _split_depth < 4:
+                    mid = len(chunk_text) // 2
+                    logger.warning(
+                        f"Groq HTTP 413 on {len(chunk_text)}-char chunk; splitting into two halves (depth={_split_depth + 1})"
+                    )
+                    left = self.extract_from_chunk(chunk_text[:mid], _split_depth=_split_depth + 1)
+                    time.sleep(2.0)
+                    right = self.extract_from_chunk(chunk_text[mid:], _split_depth=_split_depth + 1)
+                    return self.merge_extractions([left, right])
+                if status_err.status_code in [429, 502, 503, 504]:
+                    raise AITransientError(f"Groq server status {status_err.status_code}") from status_err
+                raise AIExtractionError(f"Groq API status error: {status_err.status_code}") from status_err
+            except Exception as e:
+                raise AIExtractionError(f"Unexpected AI client error: {type(e).__name__}") from e
 
         try:
             cleaned = re.sub(r"^```[a-zA-Z]*\s*", "", raw_response.strip())
@@ -142,7 +177,6 @@ class AIExtractorService:
             parsed_json = json.loads(cleaned, parse_float=Decimal)
             return InvoiceExtractionSchema(**parsed_json)
         except Exception as parse_err:
-            # Redact raw LLM payload from logs to prevent sensitive financial data leakage
             logger.error(f"Failed to parse LLM JSON (payload_length={len(raw_response)}): {type(parse_err).__name__}")
             raise AIMalformedResponseError(f"Malformed LLM JSON output: {type(parse_err).__name__}") from parse_err
 
@@ -198,17 +232,17 @@ class AIExtractorService:
         return merged
 
     def extract_invoice_data(self, document_text: str) -> InvoiceExtractionSchema:
-        """Splits large document text into chunks, extracts data per chunk, and merges results."""
+        """Splits large document text into safe-sized chunks, extracts data per chunk, and merges results."""
         if not document_text or not document_text.strip():
             return InvoiceExtractionSchema()
 
-        max_chunk_chars = 24000
+        max_chunk_chars = 12000
         if len(document_text) <= max_chunk_chars:
             return self.extract_from_chunk(document_text)
 
         chunks = []
         start = 0
-        overlap = 1000
+        overlap = 800
         while start < len(document_text):
             end = min(start + max_chunk_chars, len(document_text))
             chunks.append(document_text[start:end])
@@ -218,6 +252,8 @@ class AIExtractorService:
 
         extractions = []
         for idx, chunk in enumerate(chunks):
+            if idx > 0:
+                time.sleep(2.5)
             logger.info(f"Extracting AI data from chunk {idx + 1}/{len(chunks)}")
             res = self.extract_from_chunk(chunk)
             extractions.append(res)

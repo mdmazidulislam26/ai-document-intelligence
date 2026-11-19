@@ -4,7 +4,8 @@ import React, { useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { StatusBadge } from '@/components/StatusBadge';
 import { ValidationAlerts } from '@/components/ValidationAlerts';
-import { ArrowLeft, Save, RotateCcw, CheckCircle } from 'lucide-react';
+import { CrossVerificationPanel } from '@/components/CrossVerificationPanel';
+import { ArrowLeft, Save, RotateCcw, CheckCircle, AlertCircle } from 'lucide-react';
 import { apiClient } from '@/lib/api';
 import { formatMoney, multiplyMoney } from '@/lib/money';
 
@@ -16,12 +17,14 @@ export default function DocumentDetailPage() {
   const [document, setDocument] = useState<any>(null);
   const [formData, setFormData] = useState<any>({});
   const [isSaving, setIsSaving] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
   const fetchDocument = async () => {
     try {
       const res = await apiClient.get(`/api/documents/${documentId}`);
       setDocument(res.data);
+      setLoadError(null);
       if (res.data.extracted_invoice) {
         const inv = res.data.extracted_invoice;
         const formattedItems = (inv.line_items || []).map((item: any) => ({
@@ -44,8 +47,8 @@ export default function DocumentDetailPage() {
           line_items: formattedItems,
         });
       }
-    } catch (err) {
-      console.error('Failed to fetch document detail:', err);
+    } catch (err: any) {
+      setLoadError(err.response?.data?.detail || 'Failed to load document details.');
     }
   };
 
@@ -124,6 +127,22 @@ export default function DocumentDetailPage() {
     }
   };
 
+  if (loadError && !document) {
+    return (
+      <div className="space-y-4">
+        <button
+          onClick={() => router.push('/')}
+          className="inline-flex items-center gap-2 text-sm text-slate-600 hover:text-slate-900 font-medium"
+        >
+          <ArrowLeft className="w-4 h-4" /> Back to Dashboard
+        </button>
+        <div className="p-4 bg-rose-50 border border-rose-200 text-rose-800 rounded-xl text-sm">
+          {loadError}
+        </div>
+      </div>
+    );
+  }
+
   if (!document) return <div className="p-12 text-center text-slate-500">Loading document details...</div>;
 
   return (
@@ -146,6 +165,16 @@ export default function DocumentDetailPage() {
         </div>
       </div>
 
+      {document.error_message && (
+        <div className="flex items-start gap-3 p-4 bg-rose-50 border border-rose-200 text-rose-900 rounded-xl text-sm">
+          <AlertCircle className="w-5 h-5 text-rose-600 shrink-0 mt-0.5" />
+          <div>
+            <span className="font-semibold">Processing Error: </span>
+            <span>{document.error_message}</span>
+          </div>
+        </div>
+      )}
+
       <ValidationAlerts logs={document.validation_logs} />
 
       {successMessage && (
@@ -155,162 +184,172 @@ export default function DocumentDetailPage() {
         </div>
       )}
 
-      <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6 md:p-8 space-y-6">
-        <div className="border-b border-slate-100 pb-4">
-          <h2 className="text-lg font-bold text-slate-900">Extracted Invoice Details</h2>
-          <p className="text-xs text-slate-500">Formatted in exact financial 2-decimal precision (e.g. 150.00).</p>
+      {!document.extracted_invoice ? (
+        <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-8 text-center text-sm text-slate-500">
+          No extracted invoice data is available yet (current status: <span className="font-semibold">{document.status}</span>).
         </div>
+      ) : (
+        <>
+          <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6 md:p-8 space-y-6">
+            <div className="border-b border-slate-100 pb-4">
+              <h2 className="text-lg font-bold text-slate-900">Extracted Invoice Details</h2>
+              <p className="text-xs text-slate-500">Formatted in exact financial 2-decimal precision (e.g. 150.00).</p>
+            </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div>
-            <label className="block text-xs font-semibold text-slate-700 mb-1">Supplier Name</label>
-            <input
-              type="text"
-              value={formData.supplier_name || ''}
-              onChange={(e) => handleInputChange('supplier_name', e.target.value)}
-              className="w-full text-sm px-3 py-2 border rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none"
-            />
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">Supplier Name</label>
+                <input
+                  type="text"
+                  value={formData.supplier_name || ''}
+                  onChange={(e) => handleInputChange('supplier_name', e.target.value)}
+                  className="w-full text-sm px-3 py-2 border rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">Customer Name</label>
+                <input
+                  type="text"
+                  value={formData.customer_name || ''}
+                  onChange={(e) => handleInputChange('customer_name', e.target.value)}
+                  className="w-full text-sm px-3 py-2 border rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">Invoice Number</label>
+                <input
+                  type="text"
+                  value={formData.invoice_number || ''}
+                  onChange={(e) => handleInputChange('invoice_number', e.target.value)}
+                  className="w-full text-sm px-3 py-2 border rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">Invoice Date</label>
+                <input
+                  type="date"
+                  value={formData.invoice_date || ''}
+                  onChange={(e) => handleInputChange('invoice_date', e.target.value)}
+                  className="w-full text-sm px-3 py-2 border rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">Subtotal Amount</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  value={formData.subtotal ?? ''}
+                  onChange={(e) => handleInputChange('subtotal', e.target.value)}
+                  onBlur={() => handleBlurFormat('subtotal')}
+                  className="w-full text-sm px-3 py-2 border rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none font-mono"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">Tax Amount</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  value={formData.tax ?? ''}
+                  onChange={(e) => handleInputChange('tax', e.target.value)}
+                  onBlur={() => handleBlurFormat('tax')}
+                  className="w-full text-sm px-3 py-2 border rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none font-mono"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">Total Amount</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  value={formData.total_amount ?? ''}
+                  onChange={(e) => handleInputChange('total_amount', e.target.value)}
+                  onBlur={() => handleBlurFormat('total_amount')}
+                  className="w-full text-sm px-3 py-2 border rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none font-mono font-semibold"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">Currency</label>
+                <input
+                  type="text"
+                  value={formData.currency ?? ''}
+                  placeholder="Unknown (leave blank if missing)"
+                  onChange={(e) => handleInputChange('currency', e.target.value)}
+                  className="w-full text-sm px-3 py-2 border rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none font-mono"
+                />
+              </div>
+            </div>
+
+            <div className="pt-4">
+              <h3 className="text-sm font-bold text-slate-800 mb-3">Line Items</h3>
+              <div className="border rounded-lg overflow-hidden">
+                <table className="w-full text-left text-xs">
+                  <thead className="bg-slate-50 font-semibold text-slate-600 border-b">
+                    <tr>
+                      <th className="p-3">Description</th>
+                      <th className="p-3 w-24">Qty</th>
+                      <th className="p-3 w-32">Unit Price</th>
+                      <th className="p-3 w-32">Total</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y">
+                    {formData.line_items?.map((item: any, idx: number) => (
+                      <tr key={idx}>
+                        <td className="p-2">
+                          <input
+                            type="text"
+                            value={item.description || ''}
+                            onChange={(e) => handleLineItemChange(idx, 'description', e.target.value)}
+                            className="w-full p-1.5 border rounded outline-none text-xs"
+                          />
+                        </td>
+                        <td className="p-2">
+                          <input
+                            type="number"
+                            value={item.quantity ?? ''}
+                            onChange={(e) => handleLineItemChange(idx, 'quantity', e.target.value)}
+                            className="w-full p-1.5 border rounded outline-none text-xs font-mono"
+                          />
+                        </td>
+                        <td className="p-2">
+                          <input
+                            type="number"
+                            step="0.01"
+                            value={item.unit_price ?? ''}
+                            onChange={(e) => handleLineItemChange(idx, 'unit_price', e.target.value)}
+                            className="w-full p-1.5 border rounded outline-none text-xs font-mono"
+                          />
+                        </td>
+                        <td className="p-2 font-mono font-semibold text-slate-800">
+                          {formatMoney(item.total)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div className="pt-4 flex justify-end">
+              <button
+                onClick={handleSaveCorrections}
+                disabled={isSaving}
+                className="inline-flex items-center gap-2 px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-sm font-semibold shadow-sm transition"
+              >
+                <Save className="w-4 h-4" />
+                {isSaving ? 'Re-validating...' : 'Save & Re-validate'}
+              </button>
+            </div>
           </div>
 
-          <div>
-            <label className="block text-xs font-semibold text-slate-700 mb-1">Customer Name</label>
-            <input
-              type="text"
-              value={formData.customer_name || ''}
-              onChange={(e) => handleInputChange('customer_name', e.target.value)}
-              className="w-full text-sm px-3 py-2 border rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none"
-            />
-          </div>
-
-          <div>
-            <label className="block text-xs font-semibold text-slate-700 mb-1">Invoice Number</label>
-            <input
-              type="text"
-              value={formData.invoice_number || ''}
-              onChange={(e) => handleInputChange('invoice_number', e.target.value)}
-              className="w-full text-sm px-3 py-2 border rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none"
-            />
-          </div>
-
-          <div>
-            <label className="block text-xs font-semibold text-slate-700 mb-1">Invoice Date</label>
-            <input
-              type="date"
-              value={formData.invoice_date || ''}
-              onChange={(e) => handleInputChange('invoice_date', e.target.value)}
-              className="w-full text-sm px-3 py-2 border rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none"
-            />
-          </div>
-
-          <div>
-            <label className="block text-xs font-semibold text-slate-700 mb-1">Subtotal Amount</label>
-            <input
-              type="number"
-              step="0.01"
-              value={formData.subtotal ?? ''}
-              onChange={(e) => handleInputChange('subtotal', e.target.value)}
-              onBlur={() => handleBlurFormat('subtotal')}
-              className="w-full text-sm px-3 py-2 border rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none font-mono"
-            />
-          </div>
-
-          <div>
-            <label className="block text-xs font-semibold text-slate-700 mb-1">Tax Amount</label>
-            <input
-              type="number"
-              step="0.01"
-              value={formData.tax ?? ''}
-              onChange={(e) => handleInputChange('tax', e.target.value)}
-              onBlur={() => handleBlurFormat('tax')}
-              className="w-full text-sm px-3 py-2 border rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none font-mono"
-            />
-          </div>
-
-          <div>
-            <label className="block text-xs font-semibold text-slate-700 mb-1">Total Amount</label>
-            <input
-              type="number"
-              step="0.01"
-              value={formData.total_amount ?? ''}
-              onChange={(e) => handleInputChange('total_amount', e.target.value)}
-              onBlur={() => handleBlurFormat('total_amount')}
-              className="w-full text-sm px-3 py-2 border rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none font-mono font-semibold"
-            />
-          </div>
-
-          <div>
-            <label className="block text-xs font-semibold text-slate-700 mb-1">Currency</label>
-            <input
-              type="text"
-              value={formData.currency ?? ''}
-              placeholder="Unknown (leave blank if missing)"
-              onChange={(e) => handleInputChange('currency', e.target.value)}
-              className="w-full text-sm px-3 py-2 border rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none font-mono"
-            />
-          </div>
-        </div>
-
-        <div className="pt-4">
-          <h3 className="text-sm font-bold text-slate-800 mb-3">Line Items</h3>
-          <div className="border rounded-lg overflow-hidden">
-            <table className="w-full text-left text-xs">
-              <thead className="bg-slate-50 font-semibold text-slate-600 border-b">
-                <tr>
-                  <th className="p-3">Description</th>
-                  <th className="p-3 w-24">Qty</th>
-                  <th className="p-3 w-32">Unit Price</th>
-                  <th className="p-3 w-32">Total</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y">
-                {formData.line_items?.map((item: any, idx: number) => (
-                  <tr key={idx}>
-                    <td className="p-2">
-                      <input
-                        type="text"
-                        value={item.description || ''}
-                        onChange={(e) => handleLineItemChange(idx, 'description', e.target.value)}
-                        className="w-full p-1.5 border rounded outline-none text-xs"
-                      />
-                    </td>
-                    <td className="p-2">
-                      <input
-                        type="number"
-                        value={item.quantity ?? ''}
-                        onChange={(e) => handleLineItemChange(idx, 'quantity', e.target.value)}
-                        className="w-full p-1.5 border rounded outline-none text-xs font-mono"
-                      />
-                    </td>
-                    <td className="p-2">
-                      <input
-                        type="number"
-                        step="0.01"
-                        value={item.unit_price ?? ''}
-                        onChange={(e) => handleLineItemChange(idx, 'unit_price', e.target.value)}
-                        className="w-full p-1.5 border rounded outline-none text-xs font-mono"
-                      />
-                    </td>
-                    <td className="p-2 font-mono font-semibold text-slate-800">
-                      {formatMoney(item.total)}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-
-        <div className="pt-4 flex justify-end">
-          <button
-            onClick={handleSaveCorrections}
-            disabled={isSaving}
-            className="inline-flex items-center gap-2 px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-sm font-semibold shadow-sm transition"
-          >
-            <Save className="w-4 h-4" />
-            {isSaving ? 'Re-validating...' : 'Save & Re-validate'}
-          </button>
-        </div>
-      </div>
+          <CrossVerificationPanel documentId={documentId} onVerified={fetchDocument} />
+        </>
+      )}
     </div>
   );
 }

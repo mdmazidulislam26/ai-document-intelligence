@@ -50,7 +50,7 @@ You are an expert financial data extraction engine. Analyze the document and ret
   ]
 }
 RULES:
-1. Do not infer missing facts: If any field is not explicitly present or discernable, return null. This is a prompt instruction, not a guarantee that model output is always correct.
+1. ZERO HALLUCINATION: If any field is not explicitly present or discernable, return null.
 2. Never assume USD or any currency unless explicitly stated or indicated by symbol ($ -> USD, € -> EUR, £ -> GBP).
 3. Format invoice_date strictly as YYYY-MM-DD if available.
 4. For spreadsheets, each row should map to a line item.
@@ -78,3 +78,9 @@ post-extraction validation (DocumentValidator):
     not_evaluable.
   - If discrepancies occur, the document status is transitioned to
     requires_manual_review and specific ValidationLog entries are persisted. EOF
+
+4. Phase 6 Release Audit & Documentation Assistance
+
+  - Assistant: Google AI Studio.
+  - Scope: Read-only repository audit against assignment deliverables, generating the PostgreSQL ER diagram from actual SQLAlchemy models/migrations, adding .tiff/.xls parser and security unit tests, adding the frontend Cross-Verification UI panel and failed-document error display, and aligning evaluation report denominators.
+  - Verification: All changes were applied on a feature branch and verified by running the backend pytest suite and Next.js production build.
