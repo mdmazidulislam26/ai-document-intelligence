@@ -139,7 +139,7 @@ erDiagram
     not OCR, the full `extract_full_text()` aggregation, or the complete AI pipeline.
       - The recorded 1,000-page parser-iterator run took 0.42 seconds
         (2,360 pages/sec; reported peak RSS 121.7 MB). This is a parser-only
-        microbenchmark, not an end-to-end 1,000-page processing guarantee.
+        microbenchmark; For massive documents (>40,000 chars, e.g. 500–1,000 page PDFs), `DocumentParserService` streams all pages while `AIExtractorService` applies bounded head + tail window sampling (`4,500` chars each) and automatic HTTP `413` chunk-splitting to stay within Groq Free Tier TPM limits.
   - Schema-Constrained AI Extraction: Powered by Groq's llama-3.1-8b-instant
     with structured JSON output. Unknown or ambiguous fields should be null.
     In the current 10-document synthetic benchmark, 0 of 4 deliberately absent

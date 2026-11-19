@@ -477,8 +477,17 @@ def _write_markdown_report(summary: Dict[str, Any], records: List[Dict[str, Any]
     lines.extend([
         "",
         "## 5. Dataset Limitations & Candid Observations",
-        "- **Degraded Scans (`doc_04`):** With 2.5° skew, speckle noise, and low contrast, Tesseract OCR yielded unreadable text, resulting in 0/8 fields extracted. This document is correctly classified as `math_status = not_evaluable` rather than an arithmetic pass.",
-        "- **JPEG Character Degradation (`doc_06`):** Low quality JPEG artifact caused 1 character OCR misreading (`Greenfieid` vs `Greenfield`), resulting in 7/8 scalar accuracy.",
+        (
+            "- **Degraded Scans (`doc_04`):** Adaptive thresholding + median-blur deskewing recovered readable OCR text for the skewed/noisy scan."
+            if any(r.get("id") == "doc_04" and sum(r.get("field_matches", {}).values()) >= 6 for r in records)
+            else "- **Degraded Scans (`doc_04`):** Severe skew/noise yielded insufficient OCR text; classified as `not_evaluable` rather than an arithmetic pass."
+        ),
+        (
+            "- **JPEG Character Degradation (`doc_06`):** Low quality JPEG artifact caused minor OCR discrepancy: "
+            + "; ".join(next((r.get("discrepancies", []) for r in records if r.get("id") == "doc_06"), []))
+            if any(r.get("id") == "doc_06" and r.get("discrepancies") for r in records)
+            else "- **JPEG Compression (`doc_06`):** Extracted all scalar fields cleanly despite JPEG compression."
+        ),
         f"- **Hallucination Evaluation:** On this synthetic dataset, {summary['null_truth_fields']} ground-truth fields were deliberately null; {summary['hallucinated_fields']}/{summary['null_truth_fields']} were populated by the extractor. This is a small-sample observation, not a general zero-hallucination guarantee.",
         "- Re-run anytime via `python evaluation/generate_dataset.py && python evaluation/evaluate.py`.",
     ])

@@ -2,7 +2,8 @@
 AI information extraction service.
 Uses Groq free API with strict JSON schema outputs.
 Parses JSON floats directly into Decimal, implements typed exceptions,
-handles large 1000-page invoices via smart window chunking (head + middle sample + tail),
+auto-splits HTTP 413 oversized chunks, handles massive multi-hundred-page PDFs
+via bounded head + tail windowing within free-tier TPM limits,
 merges multi-chunk extractions deterministically, and never logs confidential invoice text.
 """
 
@@ -74,7 +75,7 @@ class AIExtractorService:
                 ],
                 response_format={"type": "json_object"},
                 temperature=0.0,
-                max_tokens=1500,
+                max_tokens=1200,
             )
             return response.choices[0].message.content or "{}"
         except (RateLimitError, AuthenticationError, APIConnectionError):
@@ -89,7 +90,7 @@ class AIExtractorService:
                     {"role": "user", "content": user_prompt},
                 ],
                 temperature=0.0,
-                max_tokens=1500,
+                max_tokens=1200,
             )
             return response.choices[0].message.content or "{}"
 
@@ -126,7 +127,7 @@ class AIExtractorService:
 
         user_prompt = f"Document Content:\n\n{chunk_text}"
         raw_response = ""
-        max_rl_attempts = 5
+        max_rl_attempts = 4
 
         for attempt in range(max_rl_attempts):
             try:
@@ -146,7 +147,7 @@ class AIExtractorService:
                             retry_after = float(raw_ra)
                         except ValueError:
                             retry_after = None
-                wait_sec = min(30.0, (retry_after + 1.0) if retry_after is not None else 8.0 * (attempt + 1))
+                wait_sec = min(62.0, (retry_after + 1.0) if retry_after is not None else 15.0 * (attempt + 1))
                 logger.warning(f"Groq rate limit hit; pacing for {wait_sec:.1f}s (attempt {attempt + 1}/{max_rl_attempts})")
                 time.sleep(wait_sec)
             except APIConnectionError as trans_err:
@@ -158,7 +159,7 @@ class AIExtractorService:
                         f"Groq HTTP 413 on {len(chunk_text)}-char chunk; splitting into two halves (depth={_split_depth + 1})"
                     )
                     left = self.extract_from_chunk(chunk_text[:mid], _split_depth=_split_depth + 1)
-                    time.sleep(1.0)
+                    time.sleep(1.5)
                     right = self.extract_from_chunk(chunk_text[mid:], _split_depth=_split_depth + 1)
                     return self.merge_extractions([left, right])
                 if status_err.status_code in [429, 502, 503, 504]:
@@ -233,9 +234,9 @@ class AIExtractorService:
 
     def extract_invoice_data(self, document_text: str) -> InvoiceExtractionSchema:
         """
-        Splits text into chunks.
-        For massive 500-1000 page documents (>40,000 chars), smartly samples the head (first pages),
-        middle samples, and tail (summary totals) to avoid exhausting LLM API tier token quotas.
+        Splits text into safe-sized chunks.
+        For massive 100-1000 page documents (>40,000 chars), extracts compact head and tail windows
+        so header metadata and final reconciliation totals stay within free-tier TPM limits.
         """
         if not document_text or not document_text.strip():
             return InvoiceExtractionSchema()
@@ -243,14 +244,10 @@ class AIExtractorService:
         max_chunk_chars = 10000
         total_len = len(document_text)
 
-        # Smart windowing for massive documents (100 to 1000 pages)
         if total_len > 40000:
-            logger.info(f"Massive document detected ({total_len} chars). Applying smart head-middle-tail windowing.")
-            head_chunk = document_text[:max_chunk_chars]
-            mid_start = total_len // 2
-            mid_chunk = document_text[mid_start:mid_start + max_chunk_chars]
-            tail_chunk = document_text[-max_chunk_chars:]
-            chunks = [head_chunk, mid_chunk, tail_chunk]
+            window_chars = 4500
+            logger.info(f"Massive document detected ({total_len} chars). Applying bounded head-tail windowing.")
+            chunks = [document_text[:window_chars], document_text[-window_chars:]]
         elif total_len <= max_chunk_chars:
             return self.extract_from_chunk(document_text)
         else:
@@ -267,7 +264,7 @@ class AIExtractorService:
         extractions = []
         for idx, chunk in enumerate(chunks):
             if idx > 0:
-                time.sleep(1.5)
+                time.sleep(2.0)
             logger.info(f"Extracting AI data from chunk {idx + 1}/{len(chunks)}")
             res = self.extract_from_chunk(chunk)
             extractions.append(res)

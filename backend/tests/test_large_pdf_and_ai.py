@@ -5,7 +5,9 @@ OCR preprocessing, typed AI exceptions, and correct line-item merging.
 
 from unittest.mock import patch, MagicMock
 from decimal import Decimal
+import httpx
 import pytest
+from openai import APIStatusError
 from services.document_parser import DocumentParserService
 from services.ai_extractor import (
     AIExtractorService,
@@ -132,3 +134,51 @@ def test_zero_hallucination_currency_null():
     raw_json = '{"invoice_number": "INV-123", "total_amount": 100.0, "currency": null}'
     schema = InvoiceExtractionSchema.model_validate_json(raw_json)
     assert schema.currency is None
+
+
+@patch("services.ai_extractor.OpenAI")
+def test_ai_413_payload_splits_and_merges(mock_openai):
+    """HTTP 413 on an oversized chunk splits into halves and merges extracted fields."""
+    req = httpx.Request("POST", "https://api.groq.com/openai/v1/chat/completions")
+    resp_413 = httpx.Response(413, request=req)
+    err_413 = APIStatusError("Request entity too large", response=resp_413, body=None)
+
+    choice_left = MagicMock()
+    choice_left.message.content = '{"invoice_number": "INV-413-OK", "supplier_name": "Split Corp", "line_items": [{"description": "Part 1", "quantity": 1, "unit_price": 50.0, "total": 50.0}]}'
+    choice_right = MagicMock()
+    choice_right.message.content = '{"total_amount": 100.0, "currency": "USD", "line_items": [{"description": "Part 2", "quantity": 1, "unit_price": 50.0, "total": 50.0}]}'
+
+    mock_instance = MagicMock()
+    mock_instance.chat.completions.create.side_effect = [
+        err_413,
+        MagicMock(choices=[choice_left]),
+        MagicMock(choices=[choice_right]),
+    ]
+    mock_openai.return_value = mock_instance
+
+    with patch("services.ai_extractor.settings.GROQ_API_KEY", "valid_key"),          patch("services.ai_extractor.time.sleep"):
+        service = AIExtractorService()
+        result = service.extract_from_chunk("A" * 5000)
+
+    assert result.invoice_number == "INV-413-OK"
+    assert result.supplier_name == "Split Corp"
+    assert result.total_amount == Decimal("100.0")
+    assert len(result.line_items) == 2
+
+
+def test_large_document_windowing_bounds_llm_calls():
+    """Documents >40k chars apply bounded head-tail windowing."""
+    service = AIExtractorService()
+    with patch.object(
+        service,
+        "extract_from_chunk",
+        side_effect=[
+            InvoiceExtractionSchema(invoice_number="INV-1000", supplier_name="MegaCloud"),
+            InvoiceExtractionSchema(total_amount=Decimal("225000.00"), currency="USD"),
+        ],
+    ) as mock_chunk, patch("services.ai_extractor.time.sleep"):
+        result = service.extract_invoice_data("HEADER " + ("X" * 50000) + " TOTAL 225000.00")
+
+    assert mock_chunk.call_count == 2
+    assert result.invoice_number == "INV-1000"
+    assert result.total_amount == Decimal("225000.00")

@@ -63,6 +63,7 @@ Deterministic Parsing & Lossless Coercion:
   - Output is validated against InvoiceExtractionSchema (Pydantic v2) with
     @field_validator hooks ensuring monetary fields coerce to Decimal and
     missing currency normalizes to None.
+  - For massive multi-hundred-page documents (>40,000 chars), extract_invoice_data applies bounded head + tail window sampling (4,500 chars each) and automatic HTTP 413 half-splitting to stay within Groq Free Tier TPM quotas.
   - Merging across multi-chunk documents (merge_extractions) applies boundary
     sliding-window matching (line_items_equal) to eliminate chunk-overlap
     duplicates without discarding legitimate identical line items.
