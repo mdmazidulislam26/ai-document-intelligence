@@ -2,7 +2,7 @@
 AI information extraction service.
 Uses Groq free API with strict JSON schema outputs.
 Parses JSON floats directly into Decimal, implements typed exceptions,
-auto-splits HTTP 413 oversized chunks, paces Groq RateLimitError retries,
+handles large 1000-page invoices via smart window chunking (head + middle sample + tail),
 merges multi-chunk extractions deterministically, and never logs confidential invoice text.
 """
 
@@ -146,7 +146,7 @@ class AIExtractorService:
                             retry_after = float(raw_ra)
                         except ValueError:
                             retry_after = None
-                wait_sec = min(65.0, (retry_after + 1.0) if retry_after is not None else 12.0 * (attempt + 1))
+                wait_sec = min(30.0, (retry_after + 1.0) if retry_after is not None else 8.0 * (attempt + 1))
                 logger.warning(f"Groq rate limit hit; pacing for {wait_sec:.1f}s (attempt {attempt + 1}/{max_rl_attempts})")
                 time.sleep(wait_sec)
             except APIConnectionError as trans_err:
@@ -158,7 +158,7 @@ class AIExtractorService:
                         f"Groq HTTP 413 on {len(chunk_text)}-char chunk; splitting into two halves (depth={_split_depth + 1})"
                     )
                     left = self.extract_from_chunk(chunk_text[:mid], _split_depth=_split_depth + 1)
-                    time.sleep(2.0)
+                    time.sleep(1.0)
                     right = self.extract_from_chunk(chunk_text[mid:], _split_depth=_split_depth + 1)
                     return self.merge_extractions([left, right])
                 if status_err.status_code in [429, 502, 503, 504]:
@@ -232,28 +232,42 @@ class AIExtractorService:
         return merged
 
     def extract_invoice_data(self, document_text: str) -> InvoiceExtractionSchema:
-        """Splits large document text into safe-sized chunks, extracts data per chunk, and merges results."""
+        """
+        Splits text into chunks.
+        For massive 500-1000 page documents (>40,000 chars), smartly samples the head (first pages),
+        middle samples, and tail (summary totals) to avoid exhausting LLM API tier token quotas.
+        """
         if not document_text or not document_text.strip():
             return InvoiceExtractionSchema()
 
-        max_chunk_chars = 12000
-        if len(document_text) <= max_chunk_chars:
-            return self.extract_from_chunk(document_text)
+        max_chunk_chars = 10000
+        total_len = len(document_text)
 
-        chunks = []
-        start = 0
-        overlap = 800
-        while start < len(document_text):
-            end = min(start + max_chunk_chars, len(document_text))
-            chunks.append(document_text[start:end])
-            if end == len(document_text):
-                break
-            start += max_chunk_chars - overlap
+        # Smart windowing for massive documents (100 to 1000 pages)
+        if total_len > 40000:
+            logger.info(f"Massive document detected ({total_len} chars). Applying smart head-middle-tail windowing.")
+            head_chunk = document_text[:max_chunk_chars]
+            mid_start = total_len // 2
+            mid_chunk = document_text[mid_start:mid_start + max_chunk_chars]
+            tail_chunk = document_text[-max_chunk_chars:]
+            chunks = [head_chunk, mid_chunk, tail_chunk]
+        elif total_len <= max_chunk_chars:
+            return self.extract_from_chunk(document_text)
+        else:
+            chunks = []
+            start = 0
+            overlap = 600
+            while start < total_len:
+                end = min(start + max_chunk_chars, total_len)
+                chunks.append(document_text[start:end])
+                if end == total_len:
+                    break
+                start += max_chunk_chars - overlap
 
         extractions = []
         for idx, chunk in enumerate(chunks):
             if idx > 0:
-                time.sleep(2.5)
+                time.sleep(1.5)
             logger.info(f"Extracting AI data from chunk {idx + 1}/{len(chunks)}")
             res = self.extract_from_chunk(chunk)
             extractions.append(res)
