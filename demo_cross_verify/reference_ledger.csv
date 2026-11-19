@@ -1,4 +1,0 @@
-Invoice Number,Invoice Date,Supplier,Customer,Subtotal,Tax,Total Amount,Currency
-INV-2024-8801,2024-05-15,TechFlow Solutions Ltd.,Apex Innovations Inc.,550.0,55.0,605.0,USD
-SKW-7710,2024-08-05,Pacific Freight Logistics,Harbor Imports LLC,450.0,45.0,495.0,USD
-INV-ERR-9920,2024-06-01,Global Hardware Corp.,Matrix Logistics,400.0,40.0,440.0,USD
