@@ -2,17 +2,19 @@
 
 import React, { useState } from 'react';
 import { useDropzone } from 'react-dropzone';
-import { UploadCloud, Loader2, CheckCircle2 } from 'lucide-react';
+import { UploadCloud, Loader2, CheckCircle2, AlertCircle } from 'lucide-react';
 import { apiClient } from '@/lib/api';
 
 export const FileUploader: React.FC<{ onUploadSuccess: () => void }> = ({ onUploadSuccess }) => {
   const [isUploading, setIsUploading] = useState(false);
   const [uploadMessage, setUploadMessage] = useState<string | null>(null);
+  const [isError, setIsError] = useState(false);
 
   const onDrop = async (acceptedFiles: File[]) => {
     if (acceptedFiles.length === 0) return;
     setIsUploading(true);
     setUploadMessage(null);
+    setIsError(false);
 
     const formData = new FormData();
     acceptedFiles.forEach((file) => {
@@ -20,13 +22,20 @@ export const FileUploader: React.FC<{ onUploadSuccess: () => void }> = ({ onUplo
     });
 
     try {
-      await apiClient.post('/api/documents/upload', formData, {
-        headers: { 'Content-Type': 'multipart/form-data' },
-      });
+      await apiClient.post('/api/documents/upload', formData);
+      setIsError(false);
       setUploadMessage(`Successfully queued ${acceptedFiles.length} file(s) for processing.`);
       onUploadSuccess();
     } catch (err: any) {
-      setUploadMessage(err.response?.data?.detail || 'Upload failed. Please verify API key and backend connection.');
+      setIsError(true);
+      const detail = err.response?.data?.detail;
+      const formattedDetail =
+        typeof detail === 'string'
+          ? detail
+          : Array.isArray(detail)
+            ? detail.map((d: any) => d?.msg || JSON.stringify(d)).join(', ')
+            : err.message || 'Upload failed. Please verify API key and backend connection.';
+      setUploadMessage(formattedDetail);
     } finally {
       setIsUploading(false);
     }
@@ -62,8 +71,16 @@ export const FileUploader: React.FC<{ onUploadSuccess: () => void }> = ({ onUplo
           Supports multi-page PDFs (up to 1000 pages), JPG, PNG, TIFF, XLSX, XLS, CSV (Max 50MB)
         </p>
         {uploadMessage && (
-          <div className="mt-4 flex items-center gap-2 text-sm text-indigo-700 bg-indigo-50 px-4 py-2 rounded-lg">
-            <CheckCircle2 className="w-4 h-4 text-indigo-600" />
+          <div
+            className={`mt-4 flex items-center gap-2 text-sm px-4 py-2 rounded-lg ${
+              isError ? 'text-rose-700 bg-rose-50' : 'text-indigo-700 bg-indigo-50'
+            }`}
+          >
+            {isError ? (
+              <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+            ) : (
+              <CheckCircle2 className="w-4 h-4 text-indigo-600 shrink-0" />
+            )}
             <span>{uploadMessage}</span>
           </div>
         )}

@@ -18,3 +18,4 @@ __pycache__/
 *.py[cod]
 uploads/
 /tmp/doc_intelligence/
+backup_before_migration.sql

@@ -24,17 +24,22 @@ OCR_MIN_TEXT_CHARS: int = int(os.getenv("OCR_MIN_TEXT_CHARS", "50"))
 
 class DocumentParserService:
     @classmethod
+    def _alnum_score(cls, text: str) -> int:
+        return sum(1 for ch in text if ch.isalnum())
+
+    @classmethod
     def deskew_image(cls, cv_img: np.ndarray) -> np.ndarray:
         """
         Corrects small document skew angles (+/- 15 degrees) safely.
-        Applies Gaussian smoothing before Otsu thresholding so background speckle noise
+        Uses median blur + adaptive thresholding so uniform background noise
         does not distort minAreaRect angle estimation.
         """
         try:
             gray = cv2.cvtColor(cv_img, cv2.COLOR_RGB2GRAY)
-            blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-            thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
-            # Erode isolated 1-2px noise specks while preserving text strokes
+            denoised = cv2.medianBlur(gray, 3)
+            thresh = cv2.adaptiveThreshold(
+                denoised, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 31, 15
+            )
             kernel = np.ones((2, 2), np.uint8)
             cleaned = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
 
@@ -50,7 +55,6 @@ class DocumentParserService:
             else:
                 angle = -angle
 
-            # Only correct realistic scan skew (avoid 45/90-deg misrotations on noisy full-page boxes)
             if 0.5 < abs(angle) <= 15.0:
                 (h, w) = cv_img.shape[:2]
                 center = (w // 2, h // 2)
@@ -62,7 +66,7 @@ class DocumentParserService:
 
     @classmethod
     def ocr_page_image(cls, pil_img: Image.Image) -> str:
-        """High-clarity adaptive OCR pipeline with safe deskew, denoising, CLAHE, and Otsu binarization."""
+        """Noise-resilient OCR pipeline using adaptive thresholding and alphanumeric scoring."""
         orig_cv = np.array(pil_img.convert("RGB"))
         cv_img = cls.deskew_image(orig_cv)
 
@@ -72,22 +76,29 @@ class DocumentParserService:
             cv_img = cv2.resize(cv_img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_CUBIC)
 
         gray = cv2.cvtColor(cv_img, cv2.COLOR_RGB2GRAY)
-        denoised = cv2.GaussianBlur(gray, (3, 3), 0)
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        enhanced = clahe.apply(denoised)
-        _, thresh = cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        denoised = cv2.medianBlur(gray, 3)
+        adaptive = cv2.adaptiveThreshold(
+            denoised, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 12
+        )
 
-        text = pytesseract.image_to_string(thresh, config=r"--oem 3 --psm 6").strip()
-        if len(text) < 20:
-            fallback_gray = pytesseract.image_to_string(gray, config=r"--oem 3 --psm 3").strip()
-            if len(fallback_gray) > len(text):
-                text = fallback_gray
-        if len(text) < 20:
+        best_text = pytesseract.image_to_string(adaptive, config=r"--oem 3 --psm 6").strip()
+        best_score = cls._alnum_score(best_text)
+
+        if best_score < 60:
+            _, otsu = cv2.threshold(denoised, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
             orig_gray = cv2.cvtColor(orig_cv, cv2.COLOR_RGB2GRAY)
-            fallback_orig = pytesseract.image_to_string(orig_gray, config=r"--oem 3 --psm 3").strip()
-            if len(fallback_orig) > len(text):
-                text = fallback_orig
-        return text
+            candidates = [
+                pytesseract.image_to_string(otsu, config=r"--oem 3 --psm 6").strip(),
+                pytesseract.image_to_string(gray, config=r"--oem 3 --psm 3").strip(),
+                pytesseract.image_to_string(orig_gray, config=r"--oem 3 --psm 3").strip(),
+            ]
+            for cand in candidates:
+                score = cls._alnum_score(cand)
+                if score > best_score:
+                    best_text = cand
+                    best_score = score
+
+        return best_text
 
     @classmethod
     def stream_pdf_pages(cls, file_path: str) -> Generator[Tuple[int, str], None, None]:

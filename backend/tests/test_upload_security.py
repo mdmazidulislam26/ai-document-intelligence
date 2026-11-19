@@ -45,6 +45,27 @@ def test_validate_png_and_jpeg_signatures():
     assert is_valid is True
 
 
+def test_validate_tiff_and_xls_signatures():
+    """Validates TIFF (little/big endian) and legacy Excel (.xls) magic bytes."""
+    tiff_le = b"II*\x00\x08\x00\x00\x00"
+    tiff_be = b"MM\x00*\x00\x00\x00\x08"
+    assert FileSecurityValidator.validate_file_content(tiff_le, ".tiff")[0] is True
+    assert FileSecurityValidator.validate_file_content(tiff_be, ".tif")[0] is True
+
+    spoofed_tiff = b"%PDF-1.4\nfake"
+    ok_t, msg_t = FileSecurityValidator.validate_file_content(spoofed_tiff, ".tiff")
+    assert ok_t is False
+    assert "signature mismatch" in msg_t.lower()
+
+    valid_xls = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + (b"\x00" * 64)
+    assert FileSecurityValidator.validate_file_content(valid_xls, ".xls")[0] is True
+
+    spoofed_xls = b"PK\x03\x04not_an_xls"
+    ok_x, msg_x = FileSecurityValidator.validate_file_content(spoofed_xls, ".xls")
+    assert ok_x is False
+    assert "signature mismatch" in msg_x.lower()
+
+
 def test_reject_empty_file():
     """Rejects empty 0-byte file uploads."""
     is_valid, msg = FileSecurityValidator.validate_file_content(b"", ".csv")

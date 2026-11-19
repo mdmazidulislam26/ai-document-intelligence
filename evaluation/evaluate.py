@@ -241,7 +241,13 @@ def compute_benchmark_summary(records: List[Dict[str, Any]]) -> Dict[str, Any]:
         "failure_rate_pct": failure_rate,
         "per_field_accuracy_pct": per_field_pct,
         "field_stats": field_stats,
+        "total_scalar_correct": total_scalar_correct,
+        "total_scalar_eval": total_scalar_eval,
         "overall_scalar_accuracy_pct": overall_scalar_acc,
+        "total_li_matched": total_li_matched,
+        "total_li_pred": total_li_pred,
+        "total_li_truth": total_li_truth,
+        "exact_li_docs": exact_li_docs,
         "line_item_precision_pct": li_precision,
         "line_item_recall_pct": li_recall,
         "line_item_f1_pct": li_f1,
@@ -413,7 +419,7 @@ def _write_markdown_report(summary: Dict[str, Any], records: List[Dict[str, Any]
     fs = summary["field_stats"]
 
     lines = [
-        "# Document Intelligence Evaluation Report (Measured Benchmark)",
+        f"# Document Intelligence Evaluation Report ({summary['total_docs']}-Document Synthetic Benchmark)",
         "",
         "## 1. Dataset & Methodology",
         f"- **Total Labeled Documents:** {summary['total_docs']} (Digital 1-page & 12-page PDFs, clean & skewed/noisy scanned PDFs, PNG & degraded JPG images, multi-sheet XLSX, CSV, incomplete null-field PDF, and math-discrepancy PDF).",
@@ -428,9 +434,9 @@ def _write_markdown_report(summary: Dict[str, Any], records: List[Dict[str, Any]
         f"| **Pipeline Execution Success Rate** | **{summary['execution_success_rate_pct']:.2f}%** | {summary['succeeded_docs']}/{summary['total_docs']} completed without crash |",
         f"| **Field Extraction Success Rate** | **{summary['extraction_success_rate_pct']:.2f}%** | {summary['extraction_successful_docs']}/{summary['total_docs']} extracted usable fields |",
         f"| **Document Processing Failure Rate** | **{summary['failure_rate_pct']:.2f}%** | {summary['failed_docs']}/{summary['total_docs']} failed |",
-        f"| **Overall Scalar Field Accuracy** | **{summary['overall_scalar_accuracy_pct']:.2f}%** | Measured across all 8 scalar fields |",
-        f"| **Line-Item 4-Field Strict F1** | **{summary['line_item_f1_pct']:.2f}%** | Precision: {summary['line_item_precision_pct']:.2f}%, Recall: {summary['line_item_recall_pct']:.2f}% (desc+qty+unit_price+total) |",
-        f"| **Line-Item Exact Document Match** | **{summary['line_item_exact_doc_pct']:.2f}%** | Documents with 100% exact item sets |",
+        f"| **Overall Scalar Field Accuracy** | **{summary['overall_scalar_accuracy_pct']:.2f}%** | {summary.get('total_scalar_correct', 0)}/{summary.get('total_scalar_eval', 0)} scalar fields matched |",
+        f"| **Line-Item 4-Field Strict F1** | **{summary['line_item_f1_pct']:.2f}%** | P: {summary['line_item_precision_pct']:.2f}% ({summary.get('total_li_matched', 0)}/{summary.get('total_li_pred', 0)}), R: {summary['line_item_recall_pct']:.2f}% ({summary.get('total_li_matched', 0)}/{summary.get('total_li_truth', 0)}) |",
+        f"| **Line-Item Exact Document Match** | **{summary['line_item_exact_doc_pct']:.2f}%** | {summary.get('exact_li_docs', 0)}/{summary['succeeded_docs']} executed docs with 100% exact item sets |",
         f"| **Arithmetic Consistency (Evaluable Valid Docs)** | **{summary['arithmetic_consistency_pct']:.2f}%** | {summary['valid_math_passed']}/{summary['evaluable_valid_math']} evaluable valid docs ({summary['valid_math_uneval']} unreadable scan not evaluable) |",
         f"| **Discrepancy Detection (Invalid Docs)** | **{_fmt_pct(summary['discrepancy_detection_pct'])}** | {summary['invalid_math_caught']}/{summary['invalid_math_expected']} intentional math errors caught |",
         f"| **Hallucination Rate (on Null Truth Fields)** | **{_fmt_pct(summary['hallucination_rate_pct'])}** | {summary['hallucinated_fields']}/{summary['null_truth_fields']} deliberately absent fields invented |",
@@ -473,7 +479,7 @@ def _write_markdown_report(summary: Dict[str, Any], records: List[Dict[str, Any]
         "## 5. Dataset Limitations & Candid Observations",
         "- **Degraded Scans (`doc_04`):** With 2.5° skew, speckle noise, and low contrast, Tesseract OCR yielded unreadable text, resulting in 0/8 fields extracted. This document is correctly classified as `math_status = not_evaluable` rather than an arithmetic pass.",
         "- **JPEG Character Degradation (`doc_06`):** Low quality JPEG artifact caused 1 character OCR misreading (`Greenfieid` vs `Greenfield`), resulting in 7/8 scalar accuracy.",
-        "- **Hallucination Evaluation:** Tested on 4 deliberately null truth fields (missing tax, currency, and invoice_date across `doc_05` and `doc_09`). The zero-hallucination constraint achieved 0.00% (0/4 invented).",
+        f"- **Hallucination Evaluation:** On this synthetic dataset, {summary['null_truth_fields']} ground-truth fields were deliberately null; {summary['hallucinated_fields']}/{summary['null_truth_fields']} were populated by the extractor. This is a small-sample observation, not a general zero-hallucination guarantee.",
         "- Re-run anytime via `python evaluation/generate_dataset.py && python evaluation/evaluate.py`.",
     ])
 
