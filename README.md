@@ -1,6 +1,6 @@
 # AI-Powered Document Intelligence System
 
-## Summary & Overview
+## Summary
 
 The **AI-Powered Document Intelligence System** is an application that helps users extract, validate, review, compare, and search financial information from business documents such as invoices.
 
@@ -657,8 +657,6 @@ This project uses AI in the document extraction stage.
 AI-generated values are not treated as automatically correct. The backend validates the response structure and applies deterministic checks for required fields, monetary arithmetic, and related consistency rules. Users can inspect and manually correct extracted information.
 
 The AI model may still misread, omit, or incorrectly infer information. The system does not claim zero hallucinations or guaranteed extraction accuracy.
-
-Development and evaluation prompts, together with the relevant AI-use notes, are documented in [`AI_PROMPTS_DISCLOSURE.md`](AI_PROMPTS_DISCLOSURE.md).
 
 ## Author
 
