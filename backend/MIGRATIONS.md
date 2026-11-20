@@ -2,7 +2,7 @@
 
 This project uses **Alembic** for deterministic, non-destructive PostgreSQL schema management.
 
-## 1. Startup Migration Safety Policy (GHR-05)
+## 1. Startup Migration Safety Policy
 - **Production (`ENVIRONMENT=production` or `AUTO_RUN_MIGRATIONS=false`):**
   - The API refuses to start (`MigrationSafetyError`) if the database has unapplied migrations, is behind `head`, or has an unknown/missing Alembic revision.
   - `Base.metadata.create_all()` is **never** relied upon in production.
